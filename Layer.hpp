@@ -41,6 +41,7 @@ public:
     convLayer,
     maxpoolLayer,
     fullLayer,
+    residualFullLayer,
     dropLayer,
     normalizationLayer
   };
@@ -66,6 +67,9 @@ public:
 
   // the actual outputs of neurons.
   double* outputs;
+
+  bool has_residual_connection;
+  int  residual_source_layer;
 
   // The errors propagated to this layer (used in the back propagation)
   // in our gradient descent method to minimize the errors.
@@ -120,4 +124,3 @@ public:
 };
 
 #endif
-
