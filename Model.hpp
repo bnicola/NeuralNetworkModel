@@ -56,6 +56,10 @@ public:
   // and the activation function that will be used.
   Layer* CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func);
 
+  // Creating a fully connected layer with a residual connection to a previous layers, it takes the number of nodes for that layer
+  // and the activation function that will be used and also the layer that is going to be added.
+  Layer* CreateResidualFullLayer(uint32_t numNodes, Layer::ActivationFunc func, int residual_source_layer = -1);
+
   // Creating a convolutional layer, it takes the depth of the layer(the number of kernels needed)
   // and the kernel size(3, 5, 7...etc), the stride used and padding. Also specify the activation 
   // function that will be used.
@@ -65,7 +69,7 @@ public:
   // used, as there is no activation for this layer, no activation function will be used.
   Layer* CreateMaxpoolLayer(uint32_t size, uint32_t stride);
 
-  Layer* CreateNormalizationLayer(uint32_t numOutputs);
+  Layer* CreateNormalizationLayer(/*uint32_t numOutputs*/);
 
   // Adding a class index with a string label so when calling the classify function
   // It will return a string for what it saw in the image.
@@ -77,6 +81,8 @@ public:
 
   // Setting our learning rate for the learning process.
   void   SetLearningRate(double rate);
+  // Getting our learning rate.
+  double GetLearningRate();
 
   // Setting our drop rate for the learning process.
   void SetDropRate(double droprate);
@@ -110,6 +116,8 @@ public:
   // Returns our total errors for a given layer.
   // usually used for the last layer to get the total loss to see it progressing.
   double GetTotalError();
+
+  double GetAverageError(uint32_t epochs);
 
   // This is used after creating a model to save its configuration.
   // This is used so as not to create a model every time we open the application
@@ -241,6 +249,8 @@ private:
   bool pruning_;
   // our minimum weight threshold.
   double pruningThreshold_;
+
+  double m_totalError;
 };
 
-#endif
+#endif 
