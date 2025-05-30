@@ -57,6 +57,11 @@ void Model::SetLearningRate(double rate)
   learningRate_ = rate;
 }
 
+double Model::GetLearningRate()
+{
+  return learningRate_;
+}
+
 void Model::SetDropRate(double droprate)
 {
   dropout_ = droprate;
@@ -146,13 +151,7 @@ void Model::GenerateDroputNodes(Layer* layer)
 
     // Generate random 0s and 1s based on the probability
     int randomValue = (std::rand() < probability * RAND_MAX) ? 0 : 1;
-    //std::cout << randomValue << " ";
     layer->dropOut[i] = randomValue;
-
-    /*if (randomValue == 0)
-       numZeros++;
-    else
-       numOnes++;*/
   }
 }
 
@@ -291,6 +290,49 @@ Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
 
   }
 
+  return full;
+}
+
+Layer* Model::CreateResidualFullLayer(uint32_t numNodes, Layer::ActivationFunc func, int residual_source_layer) 
+{
+  Layer* full = CreateFullLayer(numNodes, func);
+  //full->type = Layer::residualFullLayer;
+  if (full != nullptr)
+  {
+    // Set residual connection properties
+    full->has_residual_connection = true;
+    full->residual_source_layer = residual_source_layer;
+
+    // Ensure the dimensions match for the residual connection
+    // If residual_source_layer is -1, we use the previous layer
+    Layer* source_layer;
+    if (residual_source_layer == -1)
+    {
+      source_layer = PreviousLayer(full);
+    }
+    else
+    {
+      source_layer = GetLayer(residual_source_layer);
+    }
+
+    // Check if dimensions match for the residual connection
+    if (source_layer->n_outputs != full->n_outputs) 
+    {
+      // If dimensions don't match, we need a projection matrix
+      // This would require additional weights to transform the input dimension
+      // to match the output dimension
+      //full->projection_needed = true;
+      //full->projection_weights = new double[source_layer->n_outputs * full->n_outputs];
+      //full->projection_u_weights = new double[source_layer->n_outputs * full->n_outputs];
+
+      //// Initialize projection weights
+      //for (uint32_t i = 0; i < source_layer->n_outputs * full->n_outputs; i++)
+      //{
+      //  full->projection_weights[i] = 0.1 * nrnd();
+      //  full->projection_u_weights[i] = 0.0;
+      //}
+    }
+  }
   return full;
 }
 
@@ -440,45 +482,47 @@ Layer* Model::CreateMaxpoolLayer(uint32_t size, uint32_t stride)
   return maxpool;
 }
 
-Layer* Model::CreateNormalizationLayer(uint32_t numOutputs)
+Layer* Model::CreateNormalizationLayer(/*uint32_t numOutputs*/)
 {
-  Layer* layer = new Layer();
-  layer->type = Layer::normalizationLayer;
-  layer->n_outputs = numOutputs;
-  layer->outputs = new double[layer->n_outputs];
-  layer->errors = new double[layer->n_outputs];
-  layer->gradients = new double[layer->n_outputs];
-
-  // Initialize gamma and beta
-  layer->gamma = new double[layer->n_outputs];
-  layer->beta = new double[layer->n_outputs];
-
-  layer->n_weights = numOutputs * 2;
-  layer->weights = new double[layer->n_weights];
-  layer->u_weights = new double[layer->n_weights];
-
-  // For storing mean and variance
-  layer->mean = new double;
-  layer->variance = new double;
-
-  layer->weights = new double[layer->n_weights];
-  layer->u_weights = new double[layer->n_weights];
-  for (uint32_t i = 0; i < layer->n_weights; i++)
+  if (layers_.size() > 0) // we cannot have a normalisation layer as input layer
   {
-    layer->weights[i] = 1;// 0.1 * nrnd();// random_number;
-    layer->u_weights[i] = 0.0;// random_number;
+    Layer* layer = new Layer();
+    layer->type = Layer::normalizationLayer;
+    layer->layer_num = layerNum_++;
+    Layer* prev = PreviousLayer(layer);
+    layer->n_outputs = prev->n_outputs;
+    layer->outputs = new double[layer->n_outputs];
+    layer->errors = new double[layer->n_outputs];
+    layer->gradients = new double[layer->n_outputs];
+
+    // Initialize gamma and beta
+    layer->gamma = new double[layer->n_outputs];
+    layer->beta = new double[layer->n_outputs];
+
+    layer->n_weights = prev->n_outputs * 2;
+    layer->weights = new double[layer->n_weights];
+    layer->u_weights = new double[layer->n_weights];
+
+    // For storing mean and variance
+    layer->mean = new double;
+    layer->variance = new double;
+
+    layer->weights = new double[layer->n_weights];
+    layer->u_weights = new double[layer->n_weights];
+    for (uint32_t i = 0; i < layer->n_weights; i++)
+    {
+      layer->weights[i] = 1;// 0.1 * nrnd();// random_number;
+      layer->u_weights[i] = 0.0;// random_number;
+    }
+
+    // For storing normalized outputs
+    layer->normalized_outputs = new double[layer->n_outputs];
+
+    layers_.push_back(layer);
+
+    return layer;
   }
-
-  // For storing normalized outputs
-  layer->normalized_outputs = new double[layer->n_outputs];
-
-  layer->layer_num = layerNum_++;
-  layers_.push_back(layer);
-
-  return layer;
 }
-
-
 
 Layer* Model::NextLayer(Layer* curr)
 {
@@ -513,17 +557,18 @@ Layer* Model::GetLayer(size_t index)
   return layer;
 }
 
-void Model::ForwadPathFull(Layer* curr_layer)
+void Model::ForwadPathFull(Layer* curr_layer) 
 {
   Layer* prev = PreviousLayer(curr_layer);
 
+  // Initialize outputs to zero
   for (uint32_t i = 0; i < curr_layer->n_outputs; i++)
   {
     curr_layer->outputs[i] = 0;
   }
 
   int k = 0;
-  if (curr_layer != NULL)
+  if (curr_layer != NULL) 
   {
     for (uint32_t j = 0; j < curr_layer->n_outputs; j++)
     {
@@ -532,13 +577,15 @@ void Model::ForwadPathFull(Layer* curr_layer)
         curr_layer->outputs[j] += curr_layer->weights[k++] * prev->outputs[i];
       }
       double val = curr_layer->outputs[j];
-      if (training_) // allow dropout while training in the forward paths.
+
+      // Apply activation function and dropout during training
+      if (training_) 
       {
-        if (curr_layer->layer_num != layers_.size() - 1) //don't produce drop out in the last layer
+        curr_layer->outputs[j] = NonLinearFunction(curr_layer, val) * curr_layer->dropOut[j];
+        if (curr_layer->layer_num != layers_.size() - 1 && curr_layer->type == Layer::fullLayer && (curr_layer->layer_num != 0))
         {
           GenerateDroputNodes(curr_layer);
         }
-        curr_layer->outputs[j] = NonLinearFunction(curr_layer, val) * curr_layer->dropOut[j];
       }
       else
       {
@@ -546,9 +593,33 @@ void Model::ForwadPathFull(Layer* curr_layer)
       }
       curr_layer->gradients[j] = FunctionGradient(curr_layer, val);
     }
+
+    // Apply residual connection if configured
+    if (curr_layer->has_residual_connection) 
+    {
+      // Get the source layer for the residual connection
+      Layer* source_layer;
+      if (curr_layer->residual_source_layer == -1)
+      {
+        source_layer = prev;
+      }
+      else 
+      {
+        source_layer = GetLayer(curr_layer->residual_source_layer);
+      }
+
+      // Add the residual connection
+      if (source_layer->n_outputs == curr_layer->n_outputs) 
+      {
+        // Direct addition if dimensions match
+        for (uint32_t i = 0; i < curr_layer->n_outputs; i++) 
+        {
+          curr_layer->outputs[i] += source_layer->outputs[i];
+        }
+      }
+    }
   }
 }
-
 
 void Model::BackwardPathFull(Layer* curr_layer)
 {
@@ -557,35 +628,68 @@ void Model::BackwardPathFull(Layer* curr_layer)
     Layer* prev = layers_.at(curr_layer->layer_num - 1);
     if (prev != NULL)
     {
-      // Calculate the previous layer errors.
-      for (uint32_t i = 0; i < prev->n_outputs; i++)
+      /*for (uint32_t i = 0; i < prev->n_outputs; i++)
       {
         prev->errors[i] = 0;
-      }
+      }*/
+
+      // Propagate errors to previous layer through weights
       for (uint32_t i = 0; i < prev->n_outputs; i++)
       {
-        int k = 0;
+        int k = i;
         for (uint32_t j = 0; j < curr_layer->n_outputs; j++)
         {
-          prev->errors[i] += curr_layer->weights[k + i] * curr_layer->errors[j] * 0.01/*curr_layer->gradients[j]*/;
-          k += prev->n_outputs;
+          // Apply chain rule: error * gradient of activation function * weight
+          prev->errors[i] += curr_layer->weights[k] * curr_layer->errors[j] * curr_layer->gradients[j];
+          k += prev->n_outputs;  
         }
       }
 
-      // calculate delta W (how much each weight should change to enhance the output/decrease the loss function).
-      int k = 0;
-      for (uint32_t i = 0; i < curr_layer->n_outputs; i++)
+      // Handle residual connection in backpropagation
+      if (curr_layer->has_residual_connection)
       {
-        for (uint32_t j = 0; j < prev->n_outputs; j++)
+        // Get the source layer for the residual connection
+        Layer* source_layer;
+        if (curr_layer->residual_source_layer == -1)
         {
-          curr_layer->u_weights[k++] = curr_layer->errors[i] * curr_layer->gradients[i] * prev->outputs[j];
+          source_layer = prev;
+        }
+        else
+        {
+          source_layer = GetLayer(curr_layer->residual_source_layer);
+        }
+
+        // Direct error propagation through skip connection if dimensions match
+        if (source_layer->n_outputs == curr_layer->n_outputs)
+        {
+          for (uint32_t i = 0; i < source_layer->n_outputs; i++)
+          {
+            // Direct gradient path (the +1 term): errors flow directly through skip connection
+            source_layer->errors[i] += curr_layer->errors[i];
+          }
         }
       }
 
-      // now update our weights slightly(using our learning rate).
+      // Calculate weight updates (gradient descent)
+      int k = 0;
+      for (uint32_t j = 0; j < curr_layer->n_outputs; j++)
+      {
+        for (uint32_t i = 0; i < prev->n_outputs; i++)
+        {
+          // Calculate gradient for each weight: error * activation gradient * input
+          curr_layer->u_weights[k++] = curr_layer->errors[j] * curr_layer->gradients[j] * prev->outputs[i];
+        }
+      }
+
+      // Update weights using calculated gradients
       for (uint32_t i = 0; i < curr_layer->n_weights; i++)
       {
+        // Basic gradient descent update
         curr_layer->weights[i] -= learningRate_ * curr_layer->u_weights[i];
+
+        // Optional: Add momentum term if implemented
+        // curr_layer->weights[i] -= learningRate_ * curr_layer->u_weights[i] + momentum_ * curr_layer->prev_updates[i];
+        // curr_layer->prev_updates[i] = learningRate_ * curr_layer->u_weights[i];
       }
     }
   }
@@ -938,9 +1042,16 @@ void Model::ForwadPath(Layer* layer)
 
 void Model::TrainData(std::vector<double> values)
 {
-
   Layer* curr = GetLayer(layers_.size() - 1);
   Layer* prev = PreviousLayer(curr);
+
+  for (auto& layer : layers_)
+  {
+    for (uint32_t i = 0; i < layer->n_outputs; i++)
+    {
+      layer->errors[i] = 0;
+    }
+  }
 
   for (uint32_t i = 0; i < curr->n_outputs; i++)
   {
@@ -962,6 +1073,10 @@ void Model::TrainData(std::vector<double> values)
     else if (curr->type == Layer::normalizationLayer)
     {
       BackwardPathLayerNorm(curr);
+    }
+    else if (curr->type == Layer::residualFullLayer)
+    {
+      BackwardPathFull(curr);
     }
     else
     {
@@ -1029,24 +1144,39 @@ bool Model::SaveModel(std::string Model)
     fprintf(file, "NumberOfLayers = %zd\n", layers_.size());
     for (uint32_t i = 0; i < layers_.size(); i++)
     {
-      std::string type = (layers_.at(i)->type == Layer::fullLayer) ? "FullLayer" : (layers_.at(i)->type == Layer::inputLayer) ? "InputLayer" : (layers_.at(i)->type == Layer::maxpoolLayer) ? "MaxpoolLayer" : "ConvLayer";
-      std::string func = (layers_.at(i)->funct == Layer::sigmoid) ? "sigmoid" : (layers_.at(i)->funct == Layer::tanh) ? "tanh" : (layers_.at(i)->funct == Layer::leakyRelu) ? "leakyrelu" : "relu";
+      std::string type = (layers_.at(i)->type == Layer::fullLayer) ? "FullLayer" :
+                         (layers_.at(i)->type == Layer::inputLayer) ? "InputLayer" :
+                         (layers_.at(i)->type == Layer::maxpoolLayer) ? "MaxpoolLayer" :
+                        (layers_.at(i)->type == Layer::normalizationLayer) ? "NormalizationLayer" : "ConvLayer";
+
+      std::string func = (layers_.at(i)->funct == Layer::sigmoid) ? "sigmoid" :
+        (layers_.at(i)->funct == Layer::tanh) ? "tanh" :
+        (layers_.at(i)->funct == Layer::leakyRelu) ? "leakyrelu" : "relu";
+
       if (type == "ConvLayer" || type == "InputLayer")
       {
-        fprintf(file, "Layer%d_Nodes = %d, type = %s, function = %s, height = %d, width = %d, depth = %d, kern_size = %d, stride = %d, padding = %d\n", i, layers_.at(i)->n_outputs, type.c_str(), func.c_str(), layers_.at(i)->height, layers_.at(i)->width, layers_.at(i)->depth, layers_.at(i)->kern_size, layers_.at(i)->stride, layers_.at(i)->padding);
+        fprintf(file, "Layer%d_Nodes = %d, type = %s, function = %s, height = %d, width = %d, depth = %d, kern_size = %d, stride = %d, padding = %d\n",
+          i, layers_.at(i)->n_outputs, type.c_str(), func.c_str(), layers_.at(i)->height, layers_.at(i)->width, layers_.at(i)->depth, layers_.at(i)->kern_size, layers_.at(i)->stride, layers_.at(i)->padding);
       }
       else if (type == "FullLayer")
       {
-        fprintf(file, "Layer%d_Nodes = %d, type = %s, function = %s\n", i, layers_.at(i)->n_outputs, type.c_str(), func.c_str());
+        // Check if this is a residual layer
+        if (layers_.at(i)->has_residual_connection)
+        {
+          fprintf(file, "Layer%d_Nodes = %d, type = %s, function = %s, isResidual = true, residual_from = %d\n", i, layers_.at(i)->n_outputs, type.c_str(), func.c_str(), layers_.at(i)->residual_source_layer);
+        }
+        else
+        {
+          fprintf(file, "Layer%d_Nodes = %d, type = %s, function = %s\n", i, layers_.at(i)->n_outputs, type.c_str(), func.c_str());
+        }
       }
       else if (type == "MaxpoolLayer")
       {
         fprintf(file, "Layer%d_Nodes = %d, type = %s, kern_size = %d, stride = %d\n", i, layers_.at(i)->n_outputs, type.c_str(), layers_.at(i)->kern_size, layers_.at(i)->stride);
       }
-      else if (type == "NormalisationLayer")
+      else if (type == "NormalizationLayer")
       {
         fprintf(file, "Layer%d_Nodes = %d, type = %s\n", i, layers_.at(i)->n_outputs, type.c_str());
-        //fprintf(file, "Layer%d_Nodes = %d, type = %s, kern_size = %d, stride = %d\n", i, layers_.at(i)->n_outputs, type.c_str(), layers_.at(i)->kern_size, layers_.at(i)->stride);
       }
     }
     fclose(file);
@@ -1056,9 +1186,9 @@ bool Model::SaveModel(std::string Model)
     printf("Error opening the file for writing\n");
   }
 
-  return LoadWeights();
+  SaveWeights(modelName_);
+  return true;
 }
-
 void Model::SaveWeights(std::string Model)
 {
   if (Model == "" || Model == "Default")
@@ -1117,11 +1247,11 @@ void Model::SaveWeights(std::string Model)
               if (current->weights[index] != 0)
               {
                 std::string output = "Layer_" + std::to_string(current->layer_num) + "  Previous Node[" + std::to_string(j) + "] ---> " + "Node[" + std::to_string(i) + "], " + ", weight[" + std::to_string(current->weights[index]) + "]\n";
-#ifdef _WIN32
+                #ifdef _WIN32
                 fprintf(fp, output.c_str());
-#else
+                #else
                 fputs(output.c_str(), fp);
-#endif
+                #endif
               }
               index++;
               prevIndex++;
@@ -1152,31 +1282,191 @@ bool Model::LoadModel(std::string Model)
   {
     modelExist = true;
     char line[300];
-    uint32_t numLayers, layerNodes[40], layerHeight[40], layerWidth[40], layerDepth[40], layerKernSize[40], layerStride[40], layerPadding[40];
+    uint32_t numLayers, layerNodes[40], layerHeight[40], layerWidth[40], layerDepth[40], layerKernSize[40], layerStride[40], layerPadding[40], residualFromLayer[40];
+    bool isResidual[40];
     char stype[40];
     char sfunction[40];
     std::vector<std::string> types;
     std::vector<std::string> functions;
     int k = 0;
+
+    // Initialize arrays
+    memset(layerNodes, 0, sizeof(layerNodes));
+    memset(layerHeight, 0, sizeof(layerHeight));
+    memset(layerWidth, 0, sizeof(layerWidth));
+    memset(layerDepth, 0, sizeof(layerDepth));
+    memset(layerKernSize, 0, sizeof(layerKernSize));
+    memset(layerStride, 0, sizeof(layerStride));
+    memset(layerPadding, 0, sizeof(layerPadding));
+    memset(residualFromLayer, 0, sizeof(residualFromLayer));
+    memset(isResidual, false, sizeof(isResidual));
+
     while (fgets(line, sizeof(line), file))
     {
       if (sscanf(line, "NumberOfLayers = %d\n", &numLayers) == 1)
       {
         //printf("Number of Layers: %d\n", numLayers);
       }
-      else if (sscanf(line, "Layer%d_Nodes = %d, type =  %19[^,], function = %19[^,], height = %d, width = %d, depth = %d, kern_size = %d, stride = %d, padding = %d\n", &k, &layerNodes[k], stype, sfunction, &layerHeight[k], &layerWidth[k], &layerDepth[k], &layerKernSize[k], &layerStride[k], &layerPadding[k]) == 10)
+      // ConvLayer or InputLayer with all parameters
+      else if (sscanf(line, "Layer%d_Nodes = %d, type = %19[^,], function = %19[^,], height = %d, width = %d, depth = %d, kern_size = %d, stride = %d, padding = %d\n",
+        &k, &layerNodes[k], stype, sfunction, &layerHeight[k], &layerWidth[k], &layerDepth[k], &layerKernSize[k], &layerStride[k], &layerPadding[k]) == 10)
       {
         types.push_back(stype);
         functions.push_back(sfunction);
         k++;
       }
-      else if (sscanf(line, "Layer%d_Nodes = %d, type = %19[^,], function = %19[^\n]", &k, &layerNodes[k], stype, sfunction) == 4)
+      // ResidualFullLayer with skip connection
+      else if (sscanf(line, "Layer%d_Nodes = %d, type = %19[^,], function = %19[^,], isResidual = true, residual_from = %d\n",
+        &k, &layerNodes[k], stype, sfunction, &residualFromLayer[k]) == 5)
+      {
+        types.push_back(stype);
+        functions.push_back(sfunction);
+        isResidual[k] = true;
+        k++;
+      }
+      // FullLayer with type and function
+      else if (sscanf(line, "Layer%d_Nodes = %d, type = %19[^,], function = %19[^\n]",
+        &k, &layerNodes[k], stype, sfunction) == 4)
       {
         types.push_back(stype);
         functions.push_back(sfunction);
         k++;
       }
-      else if (sscanf(line, "Layer%d_Nodes = %: 12pt; color: rgb(0, 0, 0);">
+      // MaxpoolLayer with kernel size and stride
+      else if (sscanf(line, "Layer%d_Nodes = %d, type = %19[^,], kern_size = %d, stride = %d\n",
+        &k, &layerNodes[k], stype, &layerKernSize[k], &layerStride[k]) == 5)
+      {
+        types.push_back(stype);
+        functions.push_back("none"); // MaxpoolLayer doesn't have activation function
+        k++;
+      }
+      // NormalizationLayer (simple case)
+      else if (sscanf(line, "Layer%d_Nodes = %d, type = %19[^\n]",
+        &k, &layerNodes[k], stype) == 3)
+      {
+        types.push_back(stype);
+        functions.push_back("none"); // NormalizationLayer doesn't have activation function
+        k++;
+      }
+    }
+
+    for (uint32_t i = 0; i < numLayers; i++)
+    {
+      Layer::LayerType type = (types[i] == "ConvLayer") ? Layer::LayerType::convLayer :
+        (types[i] == "InputLayer") ? Layer::LayerType::inputLayer :
+        (types[i] == "MaxpoolLayer") ? Layer::LayerType::maxpoolLayer :
+        (types[i] == "NormalizationLayer") ? Layer::LayerType::normalizationLayer :
+        Layer::LayerType::fullLayer;
+
+      Layer::ActivationFunc func = (functions[i] == "sigmoid") ? Layer::ActivationFunc::sigmoid :
+        (functions[i] == "relu") ? Layer::ActivationFunc::relu :
+        (functions[i] == "leakyrelu") ? Layer::ActivationFunc::leakyRelu :
+        (functions[i] == "tanh") ? Layer::ActivationFunc::tanh :
+        Layer::ActivationFunc::relu; // default
+
+      if (type == Layer::fullLayer)
+      {
+        CreateFullLayer(layerNodes[i], func);
+
+        // If this is a residual layer, set the residual properties after creation
+        if (isResidual[i])
+        {
+          layers_.back()->has_residual_connection = true;
+          layers_.back()->residual_source_layer = residualFromLayer[i];
+        }
+      }
+      else if (type == Layer::inputLayer)
+      {
+        CreateInputLayer(layerHeight[i], layerWidth[i], layerDepth[i]);
+      }
+      else if (type == Layer::convLayer)
+      {
+        CreateConvLayer(layerDepth[i], layerKernSize[i], layerStride[i], layerPadding[i], func);
+      }
+      else if (type == Layer::maxpoolLayer)
+      {
+        CreateMaxpoolLayer(layerKernSize[i], layerStride[i]); // Fixed: was layerKernSize[i], layerKernSize[i]
+      }
+      else if (type == Layer::normalizationLayer)
+      {
+        CreateNormalizationLayer();
+      }
+    }
+    fclose(file); // Close the file
+  }
+  else
+  {
+    printf("Error opening the file %s for reading\n", modelPath.c_str());
+  }
+
+  if (modelExist)
+    modelExist &= LoadWeights(Model);
+
+  return modelExist;
+}
+
+bool Model::LoadWeights(std::string Model)
+{
+  bool loaded = true;
+  if (Model.empty())
+  {
+    Model = modelName_;
+  }
+  Layer* current = layers_.at(0);
+  while (current != NULL)
+  {
+    int id = current->layer_num;
+    char filename[20];
+    sprintf(filename, "Layer_%d.txt", current->layer_num);
+    std::string layerWeights = Model + "/" + std::string(filename);
+    FILE* fp;
+
+    fp = fopen(layerWeights.c_str(), "r");
+    if (fp == NULL)
+    {
+      printf("Error opening file\n");
+      return false;
+    }
+    char line[256];
+    int k = 0;
+    double threshold = 0.3;// GetMinimumThreshold(layerWeights, 0.5);
+    uint32_t numOfActiveWeights = 0;
+    for (int i = 0; i < current->n_weights; i++)
+    {
+      float weight;
+      fscanf(fp, "%g", &weight);
+      if (pruning_ == true)
+      {
+        current->weights[k] = (abs(weight) > pruningThreshold_) ? weight : 0.0; //pruning
+        numOfActiveWeights = (abs(weight) > pruningThreshold_) ? (numOfActiveWeights + 1) : numOfActiveWeights;
+        k++;
+      }
+      else
+      {
+        current->weights[k] = weight;
+        numOfActiveWeights++;
+        k++;
+      }
+    }
+    printf("Layer %d, num of weights = %d, number of active weights = %d\n", current->layer_num, current->n_weights, numOfActiveWeights);
+    fclose(fp);
+    current = NextLayer(current);
+  }
+
+  return loaded;
+}
+
+void Model::ReadCsvFile(std::string fileName, std::vector<std::vector<double>>& inputs, std::vector<uint32_t>& outputs, bool scaled)
+{
+  std::ifstream file(fileName.c_str());
+  std::string line;
+
+  while (std::getline(file, line))
+  {
+    std::vector<double> values;
+    std::stringstream ss(line);
+    std::string value;
+
     uint32_t columns = 0;
     std::vector<double> ins;
     std::vector<double> outs;
@@ -1268,6 +1558,7 @@ void Model::LearnData(std::vector<double> inputs, std::vector<double> outputs)
   double errors = GetTotalError();
   //printf("Errors = %g\n", errors);
   //double errors = GetTotalError(layers_.at(layers_.size() - 1));
+  m_totalError += errors;
   training_ = false;
 }
 
@@ -1282,6 +1573,13 @@ double Model::GetTotalError()
   }
   total = total / lastLayer->n_outputs;
   return total;
+}
+
+double Model::GetAverageError(uint32_t epochs)
+{
+  double currentError = m_totalError / epochs;
+  m_totalError = 0.0;
+  return currentError;
 }
 
 uint32_t Model::TestData(std::string fileName, bool scaled)
@@ -1383,4 +1681,3 @@ std::vector<double> Model::TargetFromDirName(std::string dir)
 
   return target;
 }
-
