@@ -1,66 +1,106 @@
 #include "Model.hpp"
 #include <iostream>
 #include <vector>
-#include <array>
+#include <iomanip>
+
+// Generate XOR dataset
+std::vector<std::pair<std::vector<double>, std::vector<double>>> generateXORData() 
+{
+  std::vector<std::pair<std::vector<double>, std::vector<double>>> data;
+
+  // XOR truth table
+  data.push_back({ {0.0, 0.0}, {0.0} });  // 0 XOR 0 = 0
+  data.push_back({ {0.0, 1.0}, {1.0} });  // 0 XOR 1 = 1
+  data.push_back({ {1.0, 0.0}, {1.0} });  // 1 XOR 0 = 1
+  data.push_back({ {1.0, 1.0}, {0.0} });  // 1 XOR 1 = 0
+
+  return data;
+}
+
+void testStableXOR(Model& model) 
+{
+   auto data = generateXORData();
+
+  // Training with adaptive learning rate
+  int epochs = 10000;  // Reduced epochs
+ 
+  std::cout << "Training for " << epochs << " epochs with adaptive learning rate..." << std::endl;
+
+  for (int epoch = 0; epoch < epochs; epoch++) 
+  {
+    for (auto& sample : data)
+    {
+      model.LearnData(sample.first, sample.second);
+    }
+
+    if (epoch % 500 == 0) 
+    {
+      double avgError = model.GetAverageError(data.size() * 500);
+      std::cout << "Epoch " << epoch << ", Average Error: " << avgError  << ", LR: " << model.GetLearningRate() << std::endl;
+    }
+  }
+
+  // Testing
+  std::cout << "\nTesting XOR results:" << std::endl;
+  std::cout << std::left << std::setw(15) << "Input" << std::setw(12) << "-> Output" << std::setw(12) << "(Expected)" << "Error" << std::endl;
+  std::cout << std::setfill('-') << std::setw(50) << "" << std::setfill(' ') << std::endl;
+
+  double totalTestError = 0.0;
+  for (auto& sample : data) 
+  {
+    model.InputData(sample.first);
+    auto output = model.GetOutput();
+    double error = abs(output[0] - sample.second[0]);
+    totalTestError += error;
+
+    std::cout << "[" << sample.first[0] << ", " << sample.first[1] << "]\t-> " << std::fixed << std::setprecision(6) << output[0] << "\t(" << sample.second[0] << ")\t\t" << error << std::endl;
+  }
+
+  std::cout << "Average Test Error: " << totalTestError / data.size() << std::endl;
+}
 
 int main()
 {
-   Model model(0.0001);
+  bool trained = false;
+  Model model3(0.001); 
+  if (trained)
+  {
+    model3.LoadModel("deep");
+    model3.SetDropRate(0.1);
+    testStableXOR(model3);
+    double totalTestError = 0.0;
+    auto data = generateXORData();
 
-   std::string modelName = "MyModel";
-   bool myModel = false;// model.LoadModel(modelName);
-   if (!myModel)
-   {
-      model.CreateFullLayer(2, Layer::leakyRelu);
-      
-      model.CreateFullLayer(25, Layer::tanh);
-      model.CreateNormalizationLayer(25);
-      model.CreateFullLayer(75, Layer::leakyRelu);
-      model.CreateFullLayer(2, Layer::leakyRelu);
+    for (auto& sample : data)
+    {
+      model3.InputData(sample.first);
+      auto output = model3.GetOutput();
+      double error = abs(output[0] - sample.second[0]);
+      totalTestError += error;
 
-      //model.SaveModel(modelName);
-   }
-   model.SetDropRate(0);
+      std::cout << "[" << sample.first[0] << ", " << sample.first[1] << "]\t-> " << std::fixed << std::setprecision(6) << output[0] << "\t(" << sample.second[0] << ")\t\t" << error << std::endl;
+    }
+  }
+  else
+  {
+    model3.SetDropRate(0.1);
+    int numOfNodes = 40;
 
-   const std::array<std::array<double, 2>, 4> inputs = { {
-       {0.01, 0.01},
-       {0.01, 0.99},
-       {0.99, 0.01},
-       {0.99, 0.99}
-   } };
-   const std::array<std::array<double, 2>, 4> outputs = { {
-       {7.1, 3.5},
-       {8.2, 4.1},
-       {4.3, -2.7},
-       {-129.4, -3164.7}
-   } };
+    model3.CreateInputLayer(1, 2, 1);
+    
+    for (int i = 0; i < 10; i++)
+    {
+      model3.CreateFullLayer(numOfNodes, Layer::ActivationFunc::tanh);
+    }
 
-   std::vector<double> in(2);
-   std::vector<double> out(2);
+    model3.CreateResidualFullLayer(numOfNodes, Layer::ActivationFunc::relu, 1);
+    model3.CreateResidualFullLayer(numOfNodes, Layer::ActivationFunc::relu, 2);
+    model3.CreateResidualFullLayer(numOfNodes, Layer::ActivationFunc::relu, 4);
+    model3.CreateFullLayer(numOfNodes, Layer::ActivationFunc::tanh);
+    model3.CreateFullLayer(1, Layer::ActivationFunc::tanh);  // Changed from sigmoid
+    testStableXOR(model3);
+    model3.SaveModel("deep");
+  } 
 
-   for (int i = 0; i < 15000; i++)
-   {
-      for (size_t j = 0; j < inputs.size(); ++j)
-      {
-         in[0] = inputs[j][0];
-         in[1] = inputs[j][1];
-         out[0] = outputs[j][0];
-         out[1] = outputs[j][1];
-         model.LearnData(in, out);
-      }
-   }
-
-   model.SaveWeights();
-
-   std::vector<double> output(2);
-   for (const auto& input : inputs)
-   {
-      in[0] = input[0];
-      in[1] = input[1];
-      model.InputData(in);
-      output = model.GetOutput();
-      printf("in1= %f, in2= %f  ==> output1 = %f, output2 = %f\n", in[0], in[1], output[0], output[1]);
-   }
-
-   return 0;
+  return 0;
 }
