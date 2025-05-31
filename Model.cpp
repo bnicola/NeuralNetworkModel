@@ -17,10 +17,12 @@ Model::Model(double learning_rate)
   modelName_("Default"),
   training_(false),
   pruning_(false)
-{}
+{
+}
 
 Model::~Model()
-{}
+{
+}
 
 double Model::rnd()
 {
@@ -169,6 +171,7 @@ Layer* Model::CreateInputLayer(int curr_height, int curr_width, int current_dept
   if (layers_.size() == 0)
   {
     inp->layer_num = layerNum_++;
+    inp->has_residual_connection = false;
     inp->type = Layer::inputLayer;
     inp->width = curr_width;
     inp->height = curr_height;
@@ -233,6 +236,7 @@ Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
     if (layers_.size() == 0)
     {
       full->layer_num = layerNum_++;
+      full->has_residual_connection = false;
       full->type = Layer::inputLayer;
       full->width = numNodes;
       full->height = 1;
@@ -252,6 +256,7 @@ Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
     else
     {
       full->layer_num = layerNum_++;
+      full->has_residual_connection = false;
       Layer* prev = PreviousLayer(full);
       full->type = Layer::fullLayer;
       full->width = 0;
@@ -293,7 +298,7 @@ Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
   return full;
 }
 
-Layer* Model::CreateResidualFullLayer(uint32_t numNodes, Layer::ActivationFunc func, int residual_source_layer) 
+Layer* Model::CreateResidualFullLayer(uint32_t numNodes, Layer::ActivationFunc func, int residual_source_layer)
 {
   Layer* full = CreateFullLayer(numNodes, func);
   //full->type = Layer::residualFullLayer;
@@ -316,7 +321,7 @@ Layer* Model::CreateResidualFullLayer(uint32_t numNodes, Layer::ActivationFunc f
     }
 
     // Check if dimensions match for the residual connection
-    if (source_layer->n_outputs != full->n_outputs) 
+    if (source_layer->n_outputs != full->n_outputs)
     {
       // If dimensions don't match, we need a projection matrix
       // This would require additional weights to transform the input dimension
@@ -557,7 +562,7 @@ Layer* Model::GetLayer(size_t index)
   return layer;
 }
 
-void Model::ForwadPathFull(Layer* curr_layer) 
+void Model::ForwardPathFull(Layer* curr_layer)
 {
   Layer* prev = PreviousLayer(curr_layer);
 
@@ -568,7 +573,7 @@ void Model::ForwadPathFull(Layer* curr_layer)
   }
 
   int k = 0;
-  if (curr_layer != NULL) 
+  if (curr_layer != NULL)
   {
     for (uint32_t j = 0; j < curr_layer->n_outputs; j++)
     {
@@ -579,7 +584,7 @@ void Model::ForwadPathFull(Layer* curr_layer)
       double val = curr_layer->outputs[j];
 
       // Apply activation function and dropout during training
-      if (training_) 
+      if (training_)
       {
         curr_layer->outputs[j] = NonLinearFunction(curr_layer, val) * curr_layer->dropOut[j];
         if (curr_layer->layer_num != layers_.size() - 1 && curr_layer->type == Layer::fullLayer && (curr_layer->layer_num != 0))
@@ -595,7 +600,7 @@ void Model::ForwadPathFull(Layer* curr_layer)
     }
 
     // Apply residual connection if configured
-    if (curr_layer->has_residual_connection) 
+    if (curr_layer->has_residual_connection)
     {
       // Get the source layer for the residual connection
       Layer* source_layer;
@@ -603,16 +608,16 @@ void Model::ForwadPathFull(Layer* curr_layer)
       {
         source_layer = prev;
       }
-      else 
+      else
       {
         source_layer = GetLayer(curr_layer->residual_source_layer);
       }
 
       // Add the residual connection
-      if (source_layer->n_outputs == curr_layer->n_outputs) 
+      if (source_layer->n_outputs == curr_layer->n_outputs)
       {
         // Direct addition if dimensions match
-        for (uint32_t i = 0; i < curr_layer->n_outputs; i++) 
+        for (uint32_t i = 0; i < curr_layer->n_outputs; i++)
         {
           curr_layer->outputs[i] += source_layer->outputs[i];
         }
@@ -641,7 +646,7 @@ void Model::BackwardPathFull(Layer* curr_layer)
         {
           // Apply chain rule: error * gradient of activation function * weight
           prev->errors[i] += curr_layer->weights[k] * curr_layer->errors[j] * curr_layer->gradients[j];
-          k += prev->n_outputs;  
+          k += prev->n_outputs;
         }
       }
 
@@ -1024,7 +1029,7 @@ void Model::ForwadPath(Layer* layer)
 {
   if (layer->type == Layer::fullLayer)
   {
-    ForwadPathFull(layer);
+    ForwardPathFull(layer);
   }
   else if (layer->type == Layer::convLayer)
   {
@@ -1145,9 +1150,9 @@ bool Model::SaveModel(std::string Model)
     for (uint32_t i = 0; i < layers_.size(); i++)
     {
       std::string type = (layers_.at(i)->type == Layer::fullLayer) ? "FullLayer" :
-                         (layers_.at(i)->type == Layer::inputLayer) ? "InputLayer" :
-                         (layers_.at(i)->type == Layer::maxpoolLayer) ? "MaxpoolLayer" :
-                        (layers_.at(i)->type == Layer::normalizationLayer) ? "NormalizationLayer" : "ConvLayer";
+        (layers_.at(i)->type == Layer::inputLayer) ? "InputLayer" :
+        (layers_.at(i)->type == Layer::maxpoolLayer) ? "MaxpoolLayer" :
+        (layers_.at(i)->type == Layer::normalizationLayer) ? "NormalizationLayer" : "ConvLayer";
 
       std::string func = (layers_.at(i)->funct == Layer::sigmoid) ? "sigmoid" :
         (layers_.at(i)->funct == Layer::tanh) ? "tanh" :
@@ -1247,11 +1252,11 @@ void Model::SaveWeights(std::string Model)
               if (current->weights[index] != 0)
               {
                 std::string output = "Layer_" + std::to_string(current->layer_num) + "  Previous Node[" + std::to_string(j) + "] ---> " + "Node[" + std::to_string(i) + "], " + ", weight[" + std::to_string(current->weights[index]) + "]\n";
-                #ifdef _WIN32
+#ifdef _WIN32
                 fprintf(fp, output.c_str());
-                #else
+#else
                 fputs(output.c_str(), fp);
-                #endif
+#endif
               }
               index++;
               prevIndex++;
