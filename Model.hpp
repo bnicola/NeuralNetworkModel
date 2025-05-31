@@ -151,7 +151,7 @@ public:
 
 private:
   // The forward path in a fully connected layer.
-  void   ForwadPathFull(Layer* current);
+  void   ForwardPathFull(Layer* current);
 
   // The forward path in a convolutional layer.
   void   ForwardPathConv(Layer* current);
