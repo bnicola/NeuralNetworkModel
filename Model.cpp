@@ -20,54 +20,76 @@ Model::Model(double learning_rate)
 {
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 Model::~Model()
 {
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 double Model::rnd()
 {
   return ((double)rand() / RAND_MAX);
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 double Model::nrnd()
 {
   return (rnd() + rnd() + rnd() + rnd() - 2.0) * 1.724; /* std=1.0 */
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 double Model::sigmoid(double x)
 {
   return 1.0 / (1.0 + exp(-x));
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 double Model::sigmoid_g(double y)
 {
   return y * (1.0 - y);
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 double Model::tanh(double y)
 {
   return  (exp(y) - exp(-y)) / (exp(y) + exp(-y));
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 double Model::tanh_g(double y)
 {
   return  (exp(y) - exp(-y)) / (exp(y) + exp(-y));
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::SetLearningRate(double rate)
 {
   learningRate_ = rate;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 double Model::GetLearningRate()
 {
   return learningRate_;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::SetDropRate(double droprate)
 {
   dropout_ = droprate;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::SetPruning(bool pruning, double threshold)
 {
@@ -76,6 +98,8 @@ void Model::SetPruning(bool pruning, double threshold)
   if (pruning_ == true)
     LoadWeights();
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 double Model::NonLinearFunction(Layer* layer, double input)
 {
@@ -95,16 +119,18 @@ double Model::NonLinearFunction(Layer* layer, double input)
   else if (layer->funct == Layer::tanh)
   {
     result = (exp(input) - exp(-input)) / (exp(input) + exp(-input));
-#ifdef _WIN32
+    #ifdef _WIN32
     if (isnan(result))
     {
       // Handle NaN case, for example, set result to a specific value
       result = 0.000001;
     }
-#endif
+    #endif
   }
   return result;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 double Model::FunctionGradient(Layer* layer, double input)
 {
@@ -128,7 +154,7 @@ double Model::FunctionGradient(Layer* layer, double input)
   }
 
   // Handle NaN case, for example, set result to a specific value
-#ifdef _WIN32
+  #ifdef _WIN32
   if (isnan(result))
   {
     result = 0.0001;
@@ -137,10 +163,12 @@ double Model::FunctionGradient(Layer* layer, double input)
   {
     result = 1.0;
   }
-#endif
+  #endif
 
   return result;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::GenerateDroputNodes(Layer* layer)
 {
@@ -156,6 +184,8 @@ void Model::GenerateDroputNodes(Layer* layer)
     layer->dropOut[i] = randomValue;
   }
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 //============================================ Public functions ====================================================
 
@@ -222,6 +252,7 @@ Layer* Model::CreateInputLayer(int curr_height, int curr_width, int current_dept
   return inp;
 }
 
+//---------------------------------------------------------------------------------------------------------------
 
 Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
 {
@@ -298,6 +329,8 @@ Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
   return full;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 Layer* Model::CreateResidualFullLayer(uint32_t numNodes, Layer::ActivationFunc func, int residual_source_layer)
 {
   Layer* full = CreateFullLayer(numNodes, func);
@@ -340,6 +373,8 @@ Layer* Model::CreateResidualFullLayer(uint32_t numNodes, Layer::ActivationFunc f
   }
   return full;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 Layer* Model::CreateConvLayer(int current_depth, int kernel_size, int stride, int padding, Layer::ActivationFunc funct)
 {
@@ -441,6 +476,8 @@ Layer* Model::CreateConvLayer(int current_depth, int kernel_size, int stride, in
   return conv;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 Layer* Model::CreateMaxpoolLayer(uint32_t size, uint32_t stride)
 {
   Layer* maxpool = new Layer();
@@ -487,6 +524,8 @@ Layer* Model::CreateMaxpoolLayer(uint32_t size, uint32_t stride)
   return maxpool;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 Layer* Model::CreateNormalizationLayer(/*uint32_t numOutputs*/)
 {
   if (layers_.size() > 0) // we cannot have a normalisation layer as input layer
@@ -529,6 +568,8 @@ Layer* Model::CreateNormalizationLayer(/*uint32_t numOutputs*/)
   }
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 Layer* Model::NextLayer(Layer* curr)
 {
   Layer* next = nullptr;
@@ -540,6 +581,8 @@ Layer* Model::NextLayer(Layer* curr)
 
   return next;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 Layer* Model::PreviousLayer(Layer* curr)
 {
@@ -553,6 +596,8 @@ Layer* Model::PreviousLayer(Layer* curr)
   return prev;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 Layer* Model::GetLayer(size_t index)
 {
   Layer* layer = nullptr;
@@ -561,6 +606,8 @@ Layer* Model::GetLayer(size_t index)
 
   return layer;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::ForwardPathFull(Layer* curr_layer)
 {
@@ -626,6 +673,8 @@ void Model::ForwardPathFull(Layer* curr_layer)
   }
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::BackwardPathFull(Layer* curr_layer)
 {
   if (curr_layer->type != Layer::inputLayer)
@@ -633,18 +682,11 @@ void Model::BackwardPathFull(Layer* curr_layer)
     Layer* prev = layers_.at(curr_layer->layer_num - 1);
     if (prev != NULL)
     {
-      /*for (uint32_t i = 0; i < prev->n_outputs; i++)
-      {
-        prev->errors[i] = 0;
-      }*/
-
-      // Propagate errors to previous layer through weights
       for (uint32_t i = 0; i < prev->n_outputs; i++)
       {
         int k = i;
         for (uint32_t j = 0; j < curr_layer->n_outputs; j++)
         {
-          // Apply chain rule: error * gradient of activation function * weight
           prev->errors[i] += curr_layer->weights[k] * curr_layer->errors[j] * curr_layer->gradients[j];
           k += prev->n_outputs;
         }
@@ -691,14 +733,12 @@ void Model::BackwardPathFull(Layer* curr_layer)
       {
         // Basic gradient descent update
         curr_layer->weights[i] -= learningRate_ * curr_layer->u_weights[i];
-
-        // Optional: Add momentum term if implemented
-        // curr_layer->weights[i] -= learningRate_ * curr_layer->u_weights[i] + momentum_ * curr_layer->prev_updates[i];
-        // curr_layer->prev_updates[i] = learningRate_ * curr_layer->u_weights[i];
       }
     }
   }
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::ForwadPathMaxpool(Layer* curr_layer)
 {
@@ -731,6 +771,8 @@ void Model::ForwadPathMaxpool(Layer* curr_layer)
     }
   }
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::BackwardPathMaxpool(Layer* curr_layer)
 {
@@ -790,6 +832,7 @@ void Model::BackwardPathMaxpool(Layer* curr_layer)
   }
 }
 
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::ForwardPathConv(Layer* curr_layer)
 {
@@ -835,6 +878,8 @@ void Model::ForwardPathConv(Layer* curr_layer)
     curr_layer->gradients[i] = FunctionGradient(curr_layer, val);
   }
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::BackwardPathConv(Layer* curr_layer)
 {
@@ -927,6 +972,8 @@ void Model::BackwardPathConv(Layer* curr_layer)
   }
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::ForwardPathLayerNorm(Layer* curr_layer)
 {
   Layer* prev = PreviousLayer(curr_layer);
@@ -956,6 +1003,7 @@ void Model::ForwardPathLayerNorm(Layer* curr_layer)
   }
 }
 
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::BackwardPathLayerNorm(Layer* curr_layer)
 {
@@ -1025,6 +1073,8 @@ void Model::BackwardPathLayerNorm(Layer* curr_layer)
   }
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::ForwadPath(Layer* layer)
 {
   if (layer->type == Layer::fullLayer)
@@ -1044,6 +1094,8 @@ void Model::ForwadPath(Layer* layer)
     ForwardPathLayerNorm(layer);
   }
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::TrainData(std::vector<double> values)
 {
@@ -1092,6 +1144,8 @@ void Model::TrainData(std::vector<double> values)
   }
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::InputData(std::vector<double> inputs)
 {
   Layer* input = GetLayer(0);;
@@ -1116,6 +1170,8 @@ void Model::InputData(std::vector<double> inputs)
   }
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 std::vector<double> Model::GetOutput()
 {
   Layer* layer = GetLayer((layers_.size() - 1));
@@ -1128,6 +1184,8 @@ std::vector<double> Model::GetOutput()
 
   return outputs;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 bool Model::SaveModel(std::string Model)
 {
@@ -1194,6 +1252,9 @@ bool Model::SaveModel(std::string Model)
   SaveWeights(modelName_);
   return true;
 }
+
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::SaveWeights(std::string Model)
 {
   if (Model == "" || Model == "Default")
@@ -1252,11 +1313,11 @@ void Model::SaveWeights(std::string Model)
               if (current->weights[index] != 0)
               {
                 std::string output = "Layer_" + std::to_string(current->layer_num) + "  Previous Node[" + std::to_string(j) + "] ---> " + "Node[" + std::to_string(i) + "], " + ", weight[" + std::to_string(current->weights[index]) + "]\n";
-#ifdef _WIN32
+                #ifdef _WIN32
                 fprintf(fp, output.c_str());
-#else
+                #else
                 fputs(output.c_str(), fp);
-#endif
+                #endif
               }
               index++;
               prevIndex++;
@@ -1271,6 +1332,8 @@ void Model::SaveWeights(std::string Model)
     }
   }
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 bool Model::LoadModel(std::string Model)
 {
@@ -1410,6 +1473,8 @@ bool Model::LoadModel(std::string Model)
   return modelExist;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 bool Model::LoadWeights(std::string Model)
 {
   bool loaded = true;
@@ -1461,6 +1526,8 @@ bool Model::LoadWeights(std::string Model)
   return loaded;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::ReadCsvFile(std::string fileName, std::vector<std::vector<double>>& inputs, std::vector<uint32_t>& outputs, bool scaled)
 {
   std::ifstream file(fileName.c_str());
@@ -1496,6 +1563,8 @@ void Model::ReadCsvFile(std::string fileName, std::vector<std::vector<double>>& 
 
   file.close();
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 void Model::TrainDataSet(std::string fileName, uint32_t epochs, uint32_t batchSize, double minLearningRate, bool scaled)
 {
@@ -1539,6 +1608,8 @@ void Model::TrainDataSet(std::string fileName, uint32_t epochs, uint32_t batchSi
   SaveWeights(modelName_);
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 uint32_t Model::GetMax(std::vector<double> values)
 {
   uint32_t ind = 0;
@@ -1555,17 +1626,19 @@ uint32_t Model::GetMax(std::vector<double> values)
   return ind;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::LearnData(std::vector<double> inputs, std::vector<double> outputs)
 {
   training_ = true;
   InputData(inputs);
   TrainData(outputs);
   double errors = GetTotalError();
-  //printf("Errors = %g\n", errors);
-  //double errors = GetTotalError(layers_.at(layers_.size() - 1));
   m_totalError += errors;
   training_ = false;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 double Model::GetTotalError()
 {
@@ -1580,12 +1653,16 @@ double Model::GetTotalError()
   return total;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 double Model::GetAverageError(uint32_t epochs)
 {
   double currentError = m_totalError / epochs;
   m_totalError = 0.0;
   return currentError;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 uint32_t Model::TestData(std::string fileName, bool scaled)
 {
@@ -1620,6 +1697,8 @@ uint32_t Model::TestData(std::string fileName, bool scaled)
   return correct;
 }
 
+//---------------------------------------------------------------------------------------------------------------
+
 void  Model::AddClass(uint32_t index, std::string label)
 {
   Classify newclass;
@@ -1627,6 +1706,8 @@ void  Model::AddClass(uint32_t index, std::string label)
   newclass.label = label;
   classes_.push_back(newclass);
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 uint32_t Model::FindClassFromDir(std::string dir)
 {
@@ -1642,13 +1723,16 @@ uint32_t Model::FindClassFromDir(std::string dir)
   }
 
   return symbolIndex;
-
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 float Model::GetCurrentConfidence()
 {
   return confidence_;
 }
+
+//---------------------------------------------------------------------------------------------------------------
 
 std::string Model::ClassifyInput(std::vector<double> inputs)
 {
@@ -1665,6 +1749,7 @@ std::string Model::ClassifyInput(std::vector<double> inputs)
   return classify;
 }
 
+//---------------------------------------------------------------------------------------------------------------
 
 std::vector<double> Model::TargetFromDirName(std::string dir)
 {
@@ -1686,3 +1771,5 @@ std::vector<double> Model::TargetFromDirName(std::string dir)
 
   return target;
 }
+
+//---------------------------------------------------------------------------------------------------------------
