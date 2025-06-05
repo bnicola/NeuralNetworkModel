@@ -13,7 +13,7 @@
 Model::Model(double learning_rate)
   :layerNum_(0),
   learningRate_(learning_rate),
-  dropout_(0.2),
+  dropout_(0.0),
   modelName_("Default"),
   training_(false),
   pruning_(false)
@@ -119,13 +119,13 @@ double Model::NonLinearFunction(Layer* layer, double input)
   else if (layer->funct == Layer::tanh)
   {
     result = (exp(input) - exp(-input)) / (exp(input) + exp(-input));
-    #ifdef _WIN32
+#ifdef _WIN32
     if (isnan(result))
     {
       // Handle NaN case, for example, set result to a specific value
       result = 0.000001;
     }
-    #endif
+#endif
   }
   return result;
 }
@@ -154,7 +154,7 @@ double Model::FunctionGradient(Layer* layer, double input)
   }
 
   // Handle NaN case, for example, set result to a specific value
-  #ifdef _WIN32
+#ifdef _WIN32
   if (isnan(result))
   {
     result = 0.0001;
@@ -163,7 +163,7 @@ double Model::FunctionGradient(Layer* layer, double input)
   {
     result = 1.0;
   }
-  #endif
+#endif
 
   return result;
 }
@@ -301,10 +301,14 @@ Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
 
       full->weights = new double[full->n_weights];
       full->u_weights = new double[full->n_weights];
+      srand(42);
       for (uint32_t i = 0; i < full->n_weights; i++)
       {
-        full->weights[i] = 0.1 * nrnd();// random_number;
-        full->u_weights[i] = 0.0;// random_number;
+        double fan_in = prev->n_outputs;
+        double fan_out = numNodes;
+        double xavier_std = sqrt(2.0 / (fan_in + fan_out));
+        full->weights[i] = xavier_std * nrnd();
+        full->u_weights[i] = 0.0;
       }
 
       full->outputs = new double[full->n_outputs];
@@ -459,7 +463,7 @@ Layer* Model::CreateConvLayer(int current_depth, int kernel_size, int stride, in
     {
       // He initialization for ReLU
       double stddev = std::sqrt(2.0 / (kernel_size * kernel_size * prev->depth));
-      conv->weights[i] = stddev * nrnd();  // Use your nrnd() function here
+      conv->weights[i] = stddev * nrnd();
       conv->u_weights[i] = 0;
     }
 
@@ -739,14 +743,19 @@ void Model::BackwardPathFull(Layer* curr_layer)
 }
 
 //---------------------------------------------------------------------------------------------------------------
-
-void Model::ForwadPathMaxpool(Layer* curr_layer)
+void Model::ForwardPathMaxpool(Layer* curr_layer)
 {
   Layer* prev_layer = PreviousLayer(curr_layer);
   uint32_t output_height = (prev_layer->height - curr_layer->kern_size) / curr_layer->stride + 1;
   uint32_t output_width = (prev_layer->width - curr_layer->kern_size) / curr_layer->stride + 1;
 
-  int k = 0;
+  // Store max indices for backward pass
+  if (!curr_layer->max_indices)
+  {
+    curr_layer->max_indices = new double[output_height * output_width * prev_layer->depth];
+  }
+
+  int output_idx = 0;
 
   for (uint32_t z = 0; z < prev_layer->depth; z++)
   {
@@ -754,19 +763,29 @@ void Model::ForwadPathMaxpool(Layer* curr_layer)
     {
       for (uint32_t x = 0; x < output_width; x++)
       {
-        int max_value_index = (z * prev_layer->height * prev_layer->width) + (y * curr_layer->stride * prev_layer->width) + (x * curr_layer->stride);
-        double max_value = prev_layer->outputs[max_value_index];// [z] [y * stride] [x * stride] ;
-        for (uint32_t k = 0; k < curr_layer->kern_size; k++)
+        double max_value = -DBL_MAX;  // Initialize to very small value
+        int max_index = -1;
+
+        // Find maximum in the kernel window
+        for (uint32_t ky = 0; ky < curr_layer->kern_size; ky++)
         {
-          int y0 = (y * curr_layer->stride) + k;
-          for (uint32_t l = 0; l < curr_layer->kern_size; l++)
+          int y_pos = y * curr_layer->stride + ky;
+          for (uint32_t kx = 0; kx < curr_layer->kern_size; kx++)
           {
-            int x0 = (x * curr_layer->stride) + l;
-            int neighb_pixels = (z * prev_layer->height * prev_layer->width) + (y0 * prev_layer->width) + x0;
-            max_value = std::max(max_value, prev_layer->outputs[neighb_pixels]);
+            int x_pos = x * curr_layer->stride + kx;
+            int input_idx = (z * prev_layer->height * prev_layer->width) + (y_pos * prev_layer->width) + x_pos;
+
+            if (prev_layer->outputs[input_idx] > max_value)
+            {
+              max_value = prev_layer->outputs[input_idx];
+              max_index = input_idx;
+            }
           }
         }
-        curr_layer->outputs[k++] = max_value;
+
+        curr_layer->outputs[output_idx] = max_value;
+        curr_layer->max_indices[output_idx] = max_index;  // Store for backward pass
+        output_idx++;
       }
     }
   }
@@ -776,61 +795,82 @@ void Model::ForwadPathMaxpool(Layer* curr_layer)
 
 void Model::BackwardPathMaxpool(Layer* curr_layer)
 {
-  Layer* prev = PreviousLayer(curr_layer);
-  int k = 0;
-  memset(prev->errors, 0, prev->n_outputs * sizeof(double));
+  Layer* prev_layer = PreviousLayer(curr_layer);
 
-  uint32_t output_height = (prev->height - curr_layer->kern_size) / curr_layer->stride + 1;
-  uint32_t output_width = (prev->width - curr_layer->kern_size) / curr_layer->stride + 1;
+  // Clear previous layer errors
+  memset(prev_layer->errors, 0, prev_layer->n_outputs * sizeof(double));
 
-  //    PrevLayer                      CurrLayer(maxpool)
-  // 
-  //    n1(0.8)-----------
-  //                      |
-  //    n2 (0.0)----------
-  //                       \___________n(max)(e.g)error = 0.8)
-  //    n3(0.0)------------/
-  //                      |
-  //    n4(0.0)------------
-  //
-  // the max pool back propagation error propagates its errors to the max node cell that resulted in its value, leaving the rest to 0s.
-  //
-  // This layer has no weights, so just we need to back propagate the errors.
+  uint32_t output_height = (prev_layer->height - curr_layer->kern_size) / curr_layer->stride + 1;
+  uint32_t output_width = (prev_layer->width - curr_layer->kern_size) / curr_layer->stride + 1;
+  int total_outputs = output_height * output_width * prev_layer->depth;
 
-  for (uint32_t z = 0; z < prev->depth; z++)
+  // Propagate error to the neuron that was selected during forward pass
+  for (int i = 0; i < total_outputs; i++)
   {
-    for (uint32_t y = 0; y < output_height/*prev->height - curr_layer->kern_size*/; y++)
-    {
-      for (uint32_t x = 0; x < output_width/*prev->width - curr_layer->kern_size*/; x++)
-      {
-        int max_index = (z * prev->height * prev->width) + (y * curr_layer->stride * prev->width) + (x * curr_layer->stride);
-        double max_value = prev->outputs[max_index];// previous_output[z][y * curr_layer->stride][x * curr_layer->stride];// assume first node to be the max.
-        int max_y = y * curr_layer->stride, max_x = x * curr_layer->stride;
-
-        for (uint32_t m = 0; m < curr_layer->kern_size; m++)
-        {
-          int y0 = y * curr_layer->stride + m;
-          for (uint32_t n = 0; n < curr_layer->kern_size; n++)
-          {
-            int x0 = x * curr_layer->stride + n;
-            int prev_out_index = (z * prev->height * prev->width) + (y0 * prev->width) + x0;
-            if (prev->outputs[prev_out_index] >= max_value)
-            {
-              max_value = prev->outputs[prev_out_index];// previous_output[z][y0][x0];
-              max_y = y0;
-              max_x = x0;
-            }
-            if (m == curr_layer->kern_size - 1 && n == (curr_layer->kern_size - 1))
-            {
-              int prev_index = (z * prev->height * prev->width) + (max_y * prev->width) + max_x;
-              prev->errors[prev_index] = curr_layer->errors[k++];
-            }
-          }
-        }
-      }
-    }
+    int max_input_idx = curr_layer->max_indices[i];
+    prev_layer->errors[max_input_idx] += curr_layer->errors[i];
   }
 }
+
+//---------------------------------------------------------------------------------------------------------------
+// 
+//void Model::BackwardPathMaxpool(Layer* curr_layer)
+//{
+//  Layer* prev = PreviousLayer(curr_layer);
+//  int k = 0;
+//  memset(prev->errors, 0, prev->n_outputs * sizeof(double));
+//
+//  uint32_t output_height = (prev->height - curr_layer->kern_size) / curr_layer->stride + 1;
+//  uint32_t output_width = (prev->width - curr_layer->kern_size) / curr_layer->stride + 1;
+//
+//  //    PrevLayer                      CurrLayer(maxpool)
+//  // 
+//  //    n1(0.8)-----------
+//  //                      |
+//  //    n2 (0.0)----------
+//  //                       \___________n(max)(e.g)error = 0.8)
+//  //    n3(0.0)------------/
+//  //                      |
+//  //    n4(0.0)------------
+//  //
+//  // the max pool back propagation error propagates its errors to the max node cell that resulted in its value, leaving the rest to 0s.
+//  //
+//  // This layer has no weights, so just we need to back propagate the errors.
+//
+//  for (uint32_t z = 0; z < prev->depth; z++)
+//  {
+//    for (uint32_t y = 0; y < output_height/*prev->height - curr_layer->kern_size*/; y++)
+//    {
+//      for (uint32_t x = 0; x < output_width/*prev->width - curr_layer->kern_size*/; x++)
+//      {
+//        int max_index = (z * prev->height * prev->width) + (y * curr_layer->stride * prev->width) + (x * curr_layer->stride);
+//        double max_value = prev->outputs[max_index];// previous_output[z][y * curr_layer->stride][x * curr_layer->stride];// assume first node to be the max.
+//        int max_y = y * curr_layer->stride, max_x = x * curr_layer->stride;
+//
+//        for (uint32_t m = 0; m < curr_layer->kern_size; m++)
+//        {
+//          int y0 = y * curr_layer->stride + m;
+//          for (uint32_t n = 0; n < curr_layer->kern_size; n++)
+//          {
+//            int x0 = x * curr_layer->stride + n;
+//            int prev_out_index = (z * prev->height * prev->width) + (y0 * prev->width) + x0;
+//            if (prev->outputs[prev_out_index] >= max_value)
+//            {
+//              max_value = prev->outputs[prev_out_index];// previous_output[z][y0][x0];
+//              max_y = y0;
+//              max_x = x0;
+//            }
+//            if (m == curr_layer->kern_size - 1 && n == (curr_layer->kern_size - 1))
+//            {
+//              int prev_index = (z * prev->height * prev->width) + (max_y * prev->width) + max_x;
+//              prev->errors[prev_index] = curr_layer->errors[k++];
+//            }
+//          }
+//        }
+//      }
+//    }
+//  }
+//}
 
 //---------------------------------------------------------------------------------------------------------------
 
@@ -1075,7 +1115,7 @@ void Model::BackwardPathLayerNorm(Layer* curr_layer)
 
 //---------------------------------------------------------------------------------------------------------------
 
-void Model::ForwadPath(Layer* layer)
+void Model::ForwardPath(Layer* layer)
 {
   if (layer->type == Layer::fullLayer)
   {
@@ -1087,7 +1127,7 @@ void Model::ForwadPath(Layer* layer)
   }
   else if (layer->type == Layer::maxpoolLayer)
   {
-    ForwadPathMaxpool(layer);
+    ForwardPathMaxpool(layer);
   }
   else if (layer->type == Layer::normalizationLayer)
   {
@@ -1112,8 +1152,6 @@ void Model::TrainData(std::vector<double> values)
 
   for (uint32_t i = 0; i < curr->n_outputs; i++)
   {
-    double outVal = curr->outputs[i];
-    double error = curr->outputs[i] - values[i];
     curr->errors[i] = (curr->outputs[i] - values[i]);
   }
 
@@ -1165,7 +1203,7 @@ void Model::InputData(std::vector<double> inputs)
   Layer* curr = NextLayer(input);
   while (curr != NULL)
   {
-    ForwadPath(curr);
+    ForwardPath(curr);
     curr = NextLayer(curr);
   }
 }
@@ -1313,11 +1351,11 @@ void Model::SaveWeights(std::string Model)
               if (current->weights[index] != 0)
               {
                 std::string output = "Layer_" + std::to_string(current->layer_num) + "  Previous Node[" + std::to_string(j) + "] ---> " + "Node[" + std::to_string(i) + "], " + ", weight[" + std::to_string(current->weights[index]) + "]\n";
-                #ifdef _WIN32
+#ifdef _WIN32
                 fprintf(fp, output.c_str());
-                #else
+#else
                 fputs(output.c_str(), fp);
-                #endif
+#endif
               }
               index++;
               prevIndex++;
