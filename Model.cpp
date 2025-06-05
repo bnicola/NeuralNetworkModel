@@ -1811,3 +1811,215 @@ std::vector<double> Model::TargetFromDirName(std::string dir)
 }
 
 //---------------------------------------------------------------------------------------------------------------
+
+bool Model::SaveModelBinary(const std::string& filename)
+{
+  size_t lastSlash = filename.find_last_of("/\\");
+  size_t lastDot = filename.find_last_of('.');
+  if (lastSlash == std::string::npos) lastSlash = 0; else lastSlash++;
+  if (lastDot == std::string::npos) lastDot = filename.length();
+  modelName_ = filename.substr(lastSlash, lastDot - lastSlash);
+
+  std::ofstream file(filename, std::ios::binary);
+  if (!file.is_open())
+  {
+    printf("Error: Cannot open file %s for writing\n", filename.c_str());
+    return false;
+  }
+
+  {
+    // Write header
+    ModelHeader header = {};
+    header.magic_number = 0x4D4F444C;  // "MODL"
+    header.version = 1;
+    header.num_layers = static_cast<uint32_t>(layers_.size());
+
+    // Calculate total weights
+    header.total_weights = 0;
+    for (const auto& layer : layers_)
+    {
+      header.total_weights += layer->n_weights;
+    }
+
+    strncpy(header.model_name, modelName_.c_str(), sizeof(header.model_name) - 1);
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+    // Write layer information
+    for (const auto& layer : layers_)
+    {
+      LayerInfo info = {};
+      info.layer_type = static_cast<uint32_t>(layer->type);
+      info.activation_func = static_cast<uint32_t>(layer->funct);
+      info.n_outputs = layer->n_outputs;
+      info.n_weights = layer->n_weights;
+      info.height = layer->height;
+      info.width = layer->width;
+      info.depth = layer->depth;
+      info.kern_size = layer->kern_size;
+      info.stride = layer->stride;
+      info.padding = layer->padding;
+      info.has_residual_connection = layer->has_residual_connection;
+      info.residual_source_layer = layer->residual_source_layer;
+
+      file.write(reinterpret_cast<const char*>(&info), sizeof(info));
+    }
+
+    // Write weights for all layers
+    for (const auto& layer : layers_)
+    {
+      if (layer->n_weights > 0)
+      {
+        file.write(reinterpret_cast<const char*>(layer->weights), layer->n_weights * sizeof(double));
+      }
+    }
+
+    file.close();
+    printf("Model saved successfully to %s\n", filename.c_str());
+    return true;
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+bool Model::LoadModelBinary(const std::string& filename)
+{
+  std::ifstream file(filename, std::ios::binary);
+  if (!file.is_open())
+  {
+    printf("Error: Cannot open file %s for reading\n", filename.c_str());
+    return false;
+  }
+
+  // Read and validate header
+  ModelHeader header;
+  file.read(reinterpret_cast<char*>(&header), sizeof(header));
+
+  if (file.gcount() != sizeof(header))
+  {
+    printf("Error: Invalid file format - header incomplete\n");
+    return false;
+  }
+
+  if (header.magic_number != 0x4D4F444C)
+  {
+    printf("Error: Invalid file format - wrong magic number\n");
+    return false;
+  }
+
+  if (header.version != 1)
+  {
+    printf("Error: Unsupported file version %d\n", header.version);
+    return false;
+  }
+
+  printf("Loading model: %s\n", header.model_name);
+  printf("Layers: %d, Total weights: %d\n", header.num_layers, header.total_weights);
+
+  // Clear existing model
+  layers_.clear();
+  layerNum_ = 0;
+  modelName_ = header.model_name;
+
+  // Read layer information and create layers
+  std::vector<LayerInfo> layer_infos(header.num_layers);
+  for (uint32_t i = 0; i < header.num_layers; i++)
+  {
+    file.read(reinterpret_cast<char*>(&layer_infos[i]), sizeof(LayerInfo));
+
+    if (file.gcount() != sizeof(LayerInfo))
+    {
+      printf("Error: Invalid file format - layer info incomplete\n");
+      return false;
+    }
+  }
+
+  // Create layers based on loaded information
+  for (uint32_t i = 0; i < header.num_layers; i++)
+  {
+    const LayerInfo& info = layer_infos[i];
+    Layer::LayerType type = static_cast<Layer::LayerType>(info.layer_type);
+    Layer::ActivationFunc func = static_cast<Layer::ActivationFunc>(info.activation_func);
+
+    switch (type)
+    {
+    case Layer::inputLayer:
+      CreateInputLayer(info.height, info.width, info.depth);
+      break;
+
+    case Layer::fullLayer:
+      CreateFullLayer(info.n_outputs, func);
+      if (info.has_residual_connection)
+      {
+        layers_.back()->has_residual_connection = true;
+        layers_.back()->residual_source_layer = info.residual_source_layer;
+      }
+      break;
+
+    case Layer::convLayer:
+      CreateConvLayer(info.depth, info.kern_size, info.stride, info.padding, func);
+      break;
+
+    case Layer::maxpoolLayer:
+      CreateMaxpoolLayer(info.kern_size, info.stride);
+      break;
+
+    case Layer::normalizationLayer:
+      CreateNormalizationLayer();
+      break;
+
+    default:
+      printf("Error: Unknown layer type %d\n", info.layer_type);
+      return false;
+    }
+  }
+
+  // Read weights for all layers
+  for (size_t i = 0; i < layers_.size(); i++)
+  {
+    Layer* layer = layers_[i];
+    const LayerInfo& info = layer_infos[i];
+
+    if (info.n_weights > 0)
+    {
+      if (layer->n_weights != info.n_weights)
+      {
+        printf("Error: Weight count mismatch in layer %d (expected %d, got %d)\n", layer->layer_num, info.n_weights, layer->n_weights);
+        return false;
+      }
+
+      file.read(reinterpret_cast<char*>(layer->weights), layer->n_weights * sizeof(double));
+
+      if (file.gcount() != static_cast<std::streamsize>(layer->n_weights * sizeof(double)))
+      {
+        printf("Error: Incomplete weight data for layer %d\n", layer->layer_num);
+        return false;
+      }
+
+      // Apply pruning if enabled
+      if (pruning_)
+      {
+        uint32_t active_weights = 0;
+        for (uint32_t j = 0; j < layer->n_weights; j++)
+        {
+          if (abs(layer->weights[j]) <= pruningThreshold_)
+          {
+            layer->weights[j] = 0.0f;
+          }
+          else
+          {
+            active_weights++;
+          }
+        }
+        printf("Layer %d: %d/%d weights active after pruning\n", layer->layer_num, active_weights, layer->n_weights);
+      }
+      else
+      {
+        printf("Layer %d: %d weights loaded\n", layer->layer_num, layer->n_weights);
+      }
+    }
+  }
+
+  file.close();
+  printf("Model loaded successfully from %s\n", filename.c_str());
+  return true;
+}
