@@ -157,7 +157,7 @@ private:
   void   ForwardPathConv(Layer* current);
 
   // The forward path in a max pool layer.
-  void   ForwadPathMaxpool(Layer* curr_layer);
+  void   ForwardPathMaxpool(Layer* curr_layer);
 
   // The forward path in a normalisation layer.
   void   ForwardPathLayerNorm(Layer* curr_layer);
@@ -176,7 +176,7 @@ private:
 
   // The back propagation called that will decide whether 
   // it is FC, Conv or maxpool layer to backward path.
-  void   ForwadPath(Layer* current);
+  void   ForwardPath(Layer* current);
 
   // Train the model on this target values.
   void   TrainData(std::vector<double> values);
