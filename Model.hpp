@@ -40,8 +40,40 @@ public:
     uint32_t index;
     std::string  label;
   };
+
   // Our list of classes.
   std::vector<Classify> classes_;
+
+  // For models file save and load.
+  // structure is header-body
+  // Header: 
+  // magic number, version, number of layers, number of weights, name
+  struct ModelHeader
+  {
+    uint32_t magic_number;      // File format identifier (e.g., 0x4D4F444C = "MODL")
+    uint32_t version;           // File format version
+    uint32_t num_layers;        // Number of layers
+    uint32_t total_weights;     // Total number of weights across all layers
+    char model_name[64];        // Model name (null-terminated)
+    uint32_t reserved[8];       // Reserved for future use
+  };
+
+  // Body :
+  // The actual layer by layer information type, activation, output nodes, 
+  // num of weights, height, width, depth, kern_size, stride and padding
+  struct LayerInfo
+  {
+    uint32_t layer_type;        // Layer::LayerType enum value
+    uint32_t activation_func;   // Layer::ActivationFunc enum value
+    uint32_t n_outputs;         // Number of outputs
+    uint32_t n_weights;         // Number of weights
+    uint32_t height, width, depth;  // For conv/input layers
+    uint32_t kern_size, stride, padding;  // For conv/maxpool layers
+    bool     has_residual_connection;
+    uint32_t residual_source_layer;
+    uint32_t reserved[4];       // Reserved for future use
+  };
+
 
 public:
   // Constructor/Destructor
@@ -124,10 +156,12 @@ public:
   // Just will use loadModel to see if we are previously created this model and whether 
   // it is trained or not.
   bool   SaveModel(std::string Model = "");
+  bool   SaveModelBinary(const std::string& filename);
 
   // This is used when we start our application to check if we already have a model with
   // the name specified so as to load the weights and do not need to train again.
   bool   LoadModel(std::string Model = "Default");
+  bool   LoadModelBinary(const std::string& filename);
 
   // This function could be used to provide the model with a csv file to train the
   // model with.
