@@ -93,6 +93,10 @@ public:
   // to calculate the dw (the amount of change needed to update the weight).
   double* gradients;
 
+  // This will be used for Maxpool layers to store which cell in th eprevious layes
+  // produced the maximum.
+  double* max_indices;
+
   // The following is used in the normalisation layer
   double* gamma;
   double* beta;
