@@ -1,106 +1,132 @@
-#include "Model.hpp"
 #include <iostream>
-#include <vector>
 #include <iomanip>
-
-// Generate XOR dataset
-std::vector<std::pair<std::vector<double>, std::vector<double>>> generateXORData() 
-{
-  std::vector<std::pair<std::vector<double>, std::vector<double>>> data;
-
-  // XOR truth table
-  data.push_back({ {0.0, 0.0}, {0.0} });  // 0 XOR 0 = 0
-  data.push_back({ {0.0, 1.0}, {1.0} });  // 0 XOR 1 = 1
-  data.push_back({ {1.0, 0.0}, {1.0} });  // 1 XOR 0 = 1
-  data.push_back({ {1.0, 1.0}, {0.0} });  // 1 XOR 1 = 0
-
-  return data;
-}
-
-void testStableXOR(Model& model) 
-{
-   auto data = generateXORData();
-
-  // Training with adaptive learning rate
-  int epochs = 10000;  // Reduced epochs
- 
-  std::cout << "Training for " << epochs << " epochs with adaptive learning rate..." << std::endl;
-
-  for (int epoch = 0; epoch < epochs; epoch++) 
-  {
-    for (auto& sample : data)
-    {
-      model.LearnData(sample.first, sample.second);
-    }
-
-    if (epoch % 500 == 0) 
-    {
-      double avgError = model.GetAverageError(data.size() * 500);
-      std::cout << "Epoch " << epoch << ", Average Error: " << avgError  << ", LR: " << model.GetLearningRate() << std::endl;
-    }
-  }
-
-  // Testing
-  std::cout << "\nTesting XOR results:" << std::endl;
-  std::cout << std::left << std::setw(15) << "Input" << std::setw(12) << "-> Output" << std::setw(12) << "(Expected)" << "Error" << std::endl;
-  std::cout << std::setfill('-') << std::setw(50) << "" << std::setfill(' ') << std::endl;
-
-  double totalTestError = 0.0;
-  for (auto& sample : data) 
-  {
-    model.InputData(sample.first);
-    auto output = model.GetOutput();
-    double error = abs(output[0] - sample.second[0]);
-    totalTestError += error;
-
-    std::cout << "[" << sample.first[0] << ", " << sample.first[1] << "]\t-> " << std::fixed << std::setprecision(6) << output[0] << "\t(" << sample.second[0] << ")\t\t" << error << std::endl;
-  }
-
-  std::cout << "Average Test Error: " << totalTestError / data.size() << std::endl;
-}
+#include <vector>
+#include <cmath>
+#include "Model.hpp"
 
 int main()
 {
-  bool trained = false;
-  Model model3(0.001); 
-  if (trained)
+  std::cout << "XOR Gate Neural Network Test\n";
+  std::cout << "============================\n\n";
+
+  // XOR training data
+  std::vector<std::vector<double>> xor_inputs = {
+      {0.0, 0.0},
+      {0.0, 1.0},
+      {1.0, 0.0},
+      {1.0, 1.0}
+  };
+
+  std::vector<std::vector<double>> xor_outputs = {
+      {0.0},
+      {1.0},
+      {1.0},
+      {0.0}
+  };
+
+  // Display XOR truth table
+  std::cout << "XOR Truth Table:\n";
+  std::cout << "Input -> Output\n";
+  for (size_t i = 0; i < xor_inputs.size(); i++)
   {
-    model3.LoadModel("deep");
-    model3.SetDropRate(0.1);
-    testStableXOR(model3);
-    double totalTestError = 0.0;
-    auto data = generateXORData();
+    std::cout << "[" << xor_inputs[i][0] << ", " << xor_inputs[i][1] << "] -> " << xor_outputs[i][0] << "\n";
+  }
+  std::cout << "\n";
 
-    for (auto& sample : data)
+  // Create neural network
+  Model* network = new Model(0.3);
+  int nodes = 10;
+  Layer* input_layer = network->CreateFullLayer(2, Layer::sigmoid);    
+  Layer* hidden_layer = network->CreateFullLayer(nodes, Layer::sigmoid);  
+  Layer* output_layer = network->CreateFullLayer(1, Layer::sigmoid);   
+
+  network->SetDropRate(0.0);
+  std::cout << "Starting training...\n\n";
+
+  // Training parameters
+  const int epochs = 8000;
+  const int print_interval = 500;
+
+  // Training loop
+  for (int epoch = 0; epoch < epochs; epoch++) 
+  {
+    for (size_t i = 0; i < xor_inputs.size(); i++) 
     {
-      model3.InputData(sample.first);
-      auto output = model3.GetOutput();
-      double error = abs(output[0] - sample.second[0]);
-      totalTestError += error;
+      network->LearnData(xor_inputs[i], xor_outputs[i]);
+    }
 
-      std::cout << "[" << sample.first[0] << ", " << sample.first[1] << "]\t-> " << std::fixed << std::setprecision(6) << output[0] << "\t(" << sample.second[0] << ")\t\t" << error << std::endl;
+    // Calculate average error for this epoch
+    double total_error = network->GetTotalError() / xor_inputs.size();
+    if ((epoch + 1) % 5000 == 0)
+    {
+      double initial_lr = network->GetLearningRate();
+      double decay_rate = 0.95;
+      double min_lr = 0.001;
+      double current_lr = std::max(initial_lr * pow(decay_rate, epoch / 1000.0), min_lr);
+    }
+    if ((epoch + 1) % print_interval == 0)
+    {
+      std::cout << "Epoch [" << std::setw(4) << (epoch + 1) << "/" << epochs << "], Loss: " << std::fixed << std::setprecision(6) << total_error << "\n";
     }
   }
-  else
+
+  std::cout << "\nTraining completed!\n\n";
+
+  // Test the trained network
+  std::cout << "Testing trained XOR gate:\n";
+  std::cout << "Input -> Target -> Prediction -> Rounded\n";
+
+  for (size_t i = 0; i < xor_inputs.size(); i++) 
   {
-    model3.SetDropRate(0.1);
-    int numOfNodes = 40;
+    network->InputData(xor_inputs[i]);
+   
+    // Get prediction from output layer
+    std::vector<double> prediction = network->GetOutput();// output_layer->outputs[0];
+    int rounded = (prediction.at(0) > 0.5) ? 1 : 0;
 
-    model3.CreateInputLayer(1, 2, 1);
-    
-    for (int i = 0; i < 10; i++)
+    std::cout << "[" << xor_inputs[i][0] << ", " << xor_inputs[i][1] << "] -> " << xor_outputs[i][0] << " -> " << std::fixed << std::setprecision(4) << prediction.at(0) << " -> " << rounded << "\n";
+  }
+
+  // Calculate accuracy
+  int correct_predictions = 0;
+  for (size_t i = 0; i < xor_inputs.size(); i++)
+  {
+    network->InputData(xor_inputs[i]);
+   
+    std::vector<double> prediction = network->GetOutput();
+    int rounded = (prediction.at(0) > 0.5) ? 1 : 0;
+    int target = static_cast<int>(xor_outputs[i][0]);
+
+    if (rounded == target)
     {
-      model3.CreateFullLayer(numOfNodes, Layer::ActivationFunc::tanh);
+      correct_predictions++;
     }
+  }
 
-    model3.CreateResidualFullLayer(numOfNodes, Layer::ActivationFunc::relu, 1);
-    model3.CreateResidualFullLayer(numOfNodes, Layer::ActivationFunc::relu, 2);
-    model3.CreateResidualFullLayer(numOfNodes, Layer::ActivationFunc::relu, 4);
-    model3.CreateFullLayer(numOfNodes, Layer::ActivationFunc::tanh);
-    model3.CreateFullLayer(1, Layer::ActivationFunc::tanh);  // Changed from sigmoid
-    testStableXOR(model3);
-    model3.SaveModel("deep");
-  } 
+  double accuracy = (static_cast<double>(correct_predictions) / xor_inputs.size()) * 100.0;
+  std::cout << "\nAccuracy: " << std::fixed << std::setprecision(1) << accuracy << "%\n";
+
+  // Test with custom inputs
+  std::cout << "\nTesting with custom inputs:\n";
+  std::vector<std::vector<double>> test_inputs = {
+      {0.0, 0.0},
+      {0.0, 1.0},
+      {1.0, 0.0},
+      {1.0, 1.0}
+  };
+
+  for (const auto& input : test_inputs) 
+  {
+    network->InputData(input);
+
+    std::vector<double> output = network->GetOutput();
+    int rounded = (output.at(0) > 0.5) ? 1 : 0;
+
+    std::cout << "XOR(" << input[0] << ", " << input[1] << ") = " << std::fixed << std::setprecision(4) << output.at(0) << " ≈ " << rounded << "\n";
+  }
+
+  // Cleanup
+  delete network;
 
   return 0;
 }
