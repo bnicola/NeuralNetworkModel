@@ -77,7 +77,7 @@ public:
 
 public:
   // Constructor/Destructor
-  Model(double learning_rate = 0.1);
+  Model(double learning_rate = 0.1, int batch_size = 1);
   ~Model();
 
   // Creating an input layer, this is always will be the very first call 
@@ -87,6 +87,13 @@ public:
   // Creating a fully connected layer, it takes the number of nodes for that layer
   // and the activation function that will be used.
   Layer* CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func);
+
+  // Creating Softmax layer.
+  // Note that this must be the last layer of any network as to preserve the
+  // probability sum to 1 of it's output.
+  Layer* CreateSoftmaxLayer();
+
+  Layer* CreateAttentionLayer(uint32_t seq_length, uint32_t d_model, uint32_t d_k = 0, uint32_t d_v = 0, uint32_t num_heads = 1);
 
   // Creating a fully connected layer with a residual connection to a previous layers, it takes the number of nodes for that layer
   // and the activation function that will be used and also the layer that is going to be added.
@@ -103,6 +110,12 @@ public:
 
   Layer* CreateNormalizationLayer(/*uint32_t numOutputs*/);
 
+  void SetBatchSize(int batch_size);
+  
+  void ResetBatch();
+
+  void FlushBatch();
+
   // Adding a class index with a string label so when calling the classify function
   // It will return a string for what it saw in the image.
   void   AddClass(uint32_t index, std::string label);
@@ -115,6 +128,11 @@ public:
   void   SetLearningRate(double rate);
   // Getting our learning rate.
   double GetLearningRate();
+
+  // Setting our momrentum value for the learning process.
+  void SetMomentum(double momentum);
+  // Getting our momentum value.
+  double GetMomrntum();
 
   // Setting our drop rate for the learning process.
   void SetDropRate(double droprate);
@@ -183,15 +201,27 @@ public:
 
   std::vector<double> TargetFromDirName(std::string dir);
 
-private:
+  void PrintModelSummary() const;
+  void PrintDetailedModel() const;
+
+public:
   // The forward path in a fully connected layer.
   void   ForwardPathFull(Layer* current);
 
   // The forward path in a convolutional layer.
   void   ForwardPathConv(Layer* current);
 
+  // The forward path in a softmax layer.
+  void   ForwardPathSoftmax(Layer* curr_layer);
+
+  // The backward path in a softmax layer.
+  void   BackwardPathSoftmax(Layer* curr_layer);
+
   // The forward path in a max pool layer.
   void   ForwardPathMaxpool(Layer* curr_layer);
+
+  void   ForwardPathAttention(Layer* curr_layer);
+  void   BackwardPathAttention(Layer* curr_layer);
 
   // The forward path in a normalisation layer.
   void   ForwardPathLayerNorm(Layer* curr_layer);
@@ -254,7 +284,14 @@ private:
   // overfitting.
   void GenerateDroputNodes(Layer* layer);
 
-private:
+  // Printing model in a pretty way
+  std::string GetLayerTypeString(Layer::LayerType type) const;
+  std::string GetActivationString(Layer::ActivationFunc func) const;
+  std::string GetOutputSizeString(const Layer* layer) const;
+  std::string GetLayerDetailsString(const Layer* layer) const;
+
+
+public:
   // our list of model layers.
   typedef std::vector<Layer*> Layers;
   Layers layers_;
@@ -265,6 +302,9 @@ private:
 
   // the learning rate of our model.
   double learningRate_;
+
+  // our momentum used for speeding up learning
+  double momentum_;
 
   // the dropout rate of our model used for preventing overfitting.
   double dropout_;
@@ -285,6 +325,9 @@ private:
   double pruningThreshold_;
 
   double m_totalError;
+
+  int batchSize_;
+  int currentBatchCount_;
 };
 
 #endif 
