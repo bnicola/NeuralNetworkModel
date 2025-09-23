@@ -10,13 +10,16 @@
 
 //#define DEBUG 
 
-Model::Model(double learning_rate)
+Model::Model(double learning_rate, int batch_size)
   :layerNum_(0),
   learningRate_(learning_rate),
   dropout_(0.0),
   modelName_("Default"),
   training_(false),
-  pruning_(false)
+  pruning_(false),
+  batchSize_(batch_size),
+  currentBatchCount_(0),
+  momentum_(0.9)
 {
 }
 
@@ -65,7 +68,8 @@ double Model::tanh(double y)
 
 double Model::tanh_g(double y)
 {
-  return  (exp(y) - exp(-y)) / (exp(y) + exp(-y));
+  double tanh_val = tanh(y);
+  return 1.0 - tanh_val * tanh_val;
 }
 
 //---------------------------------------------------------------------------------------------------------------
@@ -81,12 +85,50 @@ double Model::GetLearningRate()
 {
   return learningRate_;
 }
+//---------------------------------------------------------------------------------------------------------------
+void Model::SetMomentum(double momentum)
+{
+  momentum_ = momentum;
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+double Model::GetMomrntum()
+{
+  return momentum_;
+}
 
 //---------------------------------------------------------------------------------------------------------------
 
 void Model::SetDropRate(double droprate)
 {
   dropout_ = droprate;
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+void Model::SetBatchSize(int batch_size)
+{
+  batchSize_ = batch_size;
+  currentBatchCount_ = 0;
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+void Model::ResetBatch()
+{
+  currentBatchCount_ = 0;
+  // Reset accumulated gradients
+  for (auto& layer : layers_) 
+  {
+    if (layer->u_weights != nullptr) 
+    {
+      for (uint32_t i = 0; i < layer->n_weights; i++) 
+      {
+        layer->u_weights[i] = 0.0;
+      }
+    }
+  }
 }
 
 //---------------------------------------------------------------------------------------------------------------
@@ -181,7 +223,7 @@ void Model::GenerateDroputNodes(Layer* layer)
 
     // Generate random 0s and 1s based on the probability
     int randomValue = (std::rand() < probability * RAND_MAX) ? 0 : 1;
-    layer->dropOut[i] = randomValue;
+    layer->dropOut[i] = randomValue/(1- dropout_);
   }
 }
 
@@ -301,6 +343,11 @@ Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
 
       full->weights = new double[full->n_weights];
       full->u_weights = new double[full->n_weights];
+      full->velocities = new double[full->n_weights];
+      for (uint32_t i = 0; i < full->n_weights; i++)
+      {
+        full->velocities[i] = 0.0;
+      }
       srand(42);
       for (uint32_t i = 0; i < full->n_weights; i++)
       {
@@ -331,6 +378,114 @@ Layer* Model::CreateFullLayer(uint32_t numNodes, Layer::ActivationFunc func)
   }
 
   return full;
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+Layer* Model::CreateSoftmaxLayer()
+{
+  Layer* softmax_layer = new Layer();
+  Layer* prev = GetLayer(layers_.size() - 1);
+
+  softmax_layer->layer_num = layerNum_++;
+  softmax_layer->type = Layer::softmax;
+  softmax_layer->n_outputs = prev->n_outputs; // Must match previous layer
+
+  // No weights, biases, or gradients needed for this layer itself
+  softmax_layer->n_weights = 0;
+  softmax_layer->weights = nullptr;
+  softmax_layer->u_weights = nullptr;
+  softmax_layer->gradients = nullptr;
+
+  softmax_layer->outputs = new double[softmax_layer->n_outputs];
+  softmax_layer->errors = new double[softmax_layer->n_outputs];
+
+  layers_.push_back(softmax_layer);
+  return softmax_layer;
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+Layer* Model::CreateAttentionLayer(uint32_t seq_length, uint32_t d_model, uint32_t d_k, uint32_t d_v, uint32_t num_heads)
+{
+  // Default dimensions if not specified
+  if (d_k == 0) d_k = d_model;
+  if (d_v == 0) d_v = d_model;
+
+  Layer* layer = new Layer();
+  layer->type = Layer::attentionLayer;
+  layer->layer_num = layerNum_++;
+
+  Layer* prev = PreviousLayer(layer);
+  // Input should be seq_length * d_model (flattened sequence)
+  //layer->n_inputs  = seq_length * d_model;
+  layer->n_outputs = seq_length * d_model;  // Same size output
+
+  // Initialize attention configuration
+  layer->attention_config             = new Layer::AttentionConfig();
+  layer->attention_config->seq_length = seq_length;
+  layer->attention_config->d_model    = d_model;
+  layer->attention_config->d_k        = d_k;
+  layer->attention_config->d_v        = d_v;
+  layer->attention_config->num_heads  = num_heads;
+  layer->attention_config->use_multi_head = (num_heads > 1);
+
+  // Allocate memory
+  layer->outputs   = new double[layer->n_outputs];
+  layer->errors    = new double[layer->n_outputs];
+  layer->gradients = new double[layer->n_outputs];
+
+  // Weight matrices: [d_model x d_k/d_v] for each projection
+  uint32_t wq_size = d_model * d_k * num_heads;
+  uint32_t wk_size = d_model * d_k * num_heads;
+  uint32_t wv_size = d_model * d_v * num_heads;
+  uint32_t wo_size = d_v * d_model * num_heads;
+
+  layer->query_weights = new double[wq_size];
+  layer->key_weights = new double[wk_size];
+  layer->value_weights = new double[wv_size];
+  layer->output_weights = new double[wo_size];
+
+  layer->query_gradients = new double[wq_size];
+  layer->key_gradients = new double[wk_size];
+  layer->value_gradients = new double[wv_size];
+  layer->output_gradients = new double[wo_size];
+
+  // Temporary storage
+  layer->temp_q = new double[seq_length * d_k * num_heads];
+  layer->temp_k = new double[seq_length * d_k * num_heads];
+  layer->temp_v = new double[seq_length * d_v * num_heads];
+
+  // Attention matrices
+  layer->attention_scores = new double[seq_length * seq_length * num_heads];
+  layer->attention_weights = new double[seq_length * seq_length * num_heads];
+
+  // Initialize weights with Xavier initialization
+  double xavier_std = sqrt(2.0 / (d_model + d_k));
+  for (uint32_t i = 0; i < wq_size; i++)
+  {
+    layer->query_weights[i] = xavier_std * nrnd();
+    layer->query_gradients[i] = 0.0;
+  }
+  for (uint32_t i = 0; i < wk_size; i++)
+  {
+    layer->key_weights[i] = xavier_std * nrnd();
+    layer->key_gradients[i] = 0.0;
+  }
+  for (uint32_t i = 0; i < wv_size; i++) 
+  {
+    layer->value_weights[i] = xavier_std * nrnd();
+    layer->value_gradients[i] = 0.0;
+  }
+  for (uint32_t i = 0; i < wo_size; i++) 
+  {
+    layer->output_weights[i] = xavier_std * nrnd();
+    layer->output_gradients[i] = 0.0;
+  }
+
+  layers_.push_back(layer);
+
+  return layer;
 }
 
 //---------------------------------------------------------------------------------------------------------------
@@ -574,6 +729,297 @@ Layer* Model::CreateNormalizationLayer(/*uint32_t numOutputs*/)
 
 //---------------------------------------------------------------------------------------------------------------
 
+#include "Model.hpp"
+#include <vector>
+#include <iostream>
+
+// Add this to your Layer class in the header file
+struct RNNConfig {
+  uint32_t sequence_length;
+  uint32_t hidden_size;
+  uint32_t input_size;
+};
+
+// Add these members to your Layer class:
+// RNNConfig* rnn_config;
+// double* hidden_states;     // Store all hidden states [seq_len x hidden_size]
+// double* input_weights;     // Wxh weights [input_size x hidden_size]
+// double* hidden_weights;    // Whh weights [hidden_size x hidden_size]
+// double* bias_weights;      // bias [hidden_size]
+// double* prev_hidden;       // Previous hidden state [hidden_size]
+
+//---------------------------------------------------------------------------------------------------------------
+//
+//Layer* Model::CreateRNNLayer(uint32_t sequence_length, uint32_t hidden_size)
+//{
+//  Layer* rnn = new Layer();
+//  if (rnn == nullptr) return nullptr;
+//
+//  rnn->layer_num = layerNum_++;
+//  rnn->type = Layer::rnnLayer; // Add this enum value to your Layer::LayerType
+//  rnn->has_residual_connection = false;
+//
+//  Layer* prev = PreviousLayer(rnn);
+//  if (prev == nullptr) 
+//  {
+//    delete rnn;
+//    return nullptr;
+//  }
+//
+//  // Calculate input size per timestep (prev layer output / sequence length)
+//  uint32_t input_size = prev->n_outputs / sequence_length;
+//
+//  // Setup RNN configuration
+//  rnn->rnn_config = new RNNConfig();
+//  rnn->rnn_config->sequence_length = sequence_length;
+//  rnn->rnn_config->hidden_size = hidden_size;
+//  rnn->rnn_config->input_size = input_size;
+//
+//  // Output: hidden state at each timestep
+//  rnn->n_outputs = sequence_length * hidden_size;
+//
+//  // Weight sizes
+//  uint32_t wxh_size = input_size * hidden_size;   // Input to hidden
+//  uint32_t whh_size = hidden_size * hidden_size;  // Hidden to hidden
+//  uint32_t bias_size = hidden_size;               // Bias
+//
+//  rnn->n_weights = wxh_size + whh_size + bias_size;
+//
+//  // Allocate memory
+//  rnn->outputs = new double[rnn->n_outputs];
+//  rnn->errors = new double[rnn->n_outputs];
+//  rnn->gradients = new double[rnn->n_outputs];
+//
+//  // RNN specific memory
+//  rnn->hidden_states = new double[sequence_length * hidden_size];
+//  rnn->input_weights = new double[wxh_size];
+//  rnn->hidden_weights = new double[whh_size];
+//  rnn->bias_weights = new double[bias_size];
+//  rnn->prev_hidden = new double[hidden_size];
+//
+//  // Weight gradients
+//  rnn->weights = new double[rnn->n_weights];
+//  rnn->u_weights = new double[rnn->n_weights];
+//
+//  // Initialize weights with Xavier initialization
+//  double xavier_input = sqrt(2.0 / (input_size + hidden_size));
+//  double xavier_hidden = sqrt(2.0 / (hidden_size + hidden_size));
+//
+//  // Initialize input weights (Wxh)
+//  for (uint32_t i = 0; i < wxh_size; i++) 
+//  {
+//    rnn->input_weights[i] = xavier_input * nrnd();
+//  }
+//
+//  // Initialize hidden weights (Whh)  
+//  for (uint32_t i = 0; i < whh_size; i++) 
+//  {
+//    rnn->hidden_weights[i] = xavier_hidden * nrnd();
+//  }
+//
+//  // Initialize bias weights
+//  for (uint32_t i = 0; i < bias_size; i++)
+//  {
+//    rnn->bias_weights[i] = 0.0; // Biases typically start at zero
+//  }
+//
+//  // Initialize states
+//  for (uint32_t i = 0; i < rnn->n_outputs; i++) {
+//    rnn->outputs[i] = 0.0;
+//    rnn->errors[i] = 0.0;
+//    rnn->gradients[i] = 0.0;
+//  }
+//
+//  for (uint32_t i = 0; i < hidden_size; i++) {
+//    rnn->prev_hidden[i] = 0.0;
+//  }
+//
+//  rnn->funct = Layer::tanh; // RNNs typically use tanh activation
+//
+//  layers_.push_back(rnn);
+//  return rnn;
+//}
+
+//---------------------------------------------------------------------------------------------------------------
+
+//void Model::ForwardPathRNN(Layer* curr_layer)
+//{
+//  Layer* prev = PreviousLayer(curr_layer);
+//  RNNConfig* config = curr_layer->rnn_config;
+//
+//  // Clear previous hidden state at start of sequence
+//  for (uint32_t i = 0; i < config->hidden_size; i++)
+//  {
+//    curr_layer->prev_hidden[i] = 0.0;
+//  }
+//
+//  // Process each timestep
+//  for (uint32_t t = 0; t < config->sequence_length; t++)
+//  {
+//    // Get input for this timestep
+//    double* input_t = &prev->outputs[t * config->input_size];
+//    double* hidden_t = &curr_layer->hidden_states[t * config->hidden_size];
+//
+//    // Compute hidden state: h_t = tanh(Wxh * x_t + Whh * h_{t-1} + b)
+//    for (uint32_t h = 0; h < config->hidden_size; h++)
+//    {
+//      double sum = curr_layer->bias_weights[h];
+//
+//      // Input contribution: Wxh * x_t
+//      for (uint32_t i = 0; i < config->input_size; i++)
+//      {
+//        sum += curr_layer->input_weights[i * config->hidden_size + h] * input_t[i];
+//      }
+//
+//      // Hidden contribution: Whh * h_{t-1}  
+//      for (uint32_t prev_h = 0; prev_h < config->hidden_size; prev_h++)
+//      {
+//        sum += curr_layer->hidden_weights[prev_h * config->hidden_size + h] * curr_layer->prev_hidden[prev_h];
+//      }
+//
+//      // Apply activation function (tanh)
+//      hidden_t[h] = NonLinearFunction(curr_layer, sum);
+//
+//      // Store in outputs (flattened)
+//      curr_layer->outputs[t * config->hidden_size + h] = hidden_t[h];
+//    }
+//
+//    // Update previous hidden state for next timestep
+//    for (uint32_t h = 0; h < config->hidden_size; h++) 
+//    {
+//      curr_layer->prev_hidden[h] = hidden_t[h];
+//    }
+//  }
+//}
+//
+////---------------------------------------------------------------------------------------------------------------
+//
+//void Model::BackwardPathRNN(Layer* curr_layer)
+//{
+//  Layer* prev = PreviousLayer(curr_layer);
+//  RNNConfig* config = curr_layer->rnn_config;
+//
+//  // Clear previous layer errors
+//  for (uint32_t i = 0; i < prev->n_outputs; i++) {
+//    prev->errors[i] = 0.0;
+//  }
+//
+//  // Initialize gradient accumulators
+//  std::vector<double> wxh_grad(config->input_size * config->hidden_size, 0.0);
+//  std::vector<double> whh_grad(config->hidden_size * config->hidden_size, 0.0);
+//  std::vector<double> bias_grad(config->hidden_size, 0.0);
+//
+//  // Hidden state gradient for next timestep (starts at 0)
+//  std::vector<double> next_h_grad(config->hidden_size, 0.0);
+//
+//  // Backward through time (from last timestep to first)
+//  for (int t = config->sequence_length - 1; t >= 0; t--)
+//  {
+//    // Get current timestep data
+//    double* input_t = &prev->outputs[t * config->input_size];
+//    double* hidden_t = &curr_layer->hidden_states[t * config->hidden_size];
+//    double* h_prev = (t == 0) ? nullptr : &curr_layer->hidden_states[(t - 1) * config->hidden_size];
+//
+//    // Current hidden gradient = output error + gradient from next timestep
+//    std::vector<double> h_grad(config->hidden_size);
+//    for (uint32_t h = 0; h < config->hidden_size; h++) 
+//    {
+//      h_grad[h] = curr_layer->errors[t * config->hidden_size + h] + next_h_grad[h];
+//    }
+//
+//    // Compute raw hidden state (before activation)
+//    std::vector<double> raw_hidden(config->hidden_size);
+//    for (uint32_t h = 0; h < config->hidden_size; h++) 
+//    {
+//      double sum = curr_layer->bias_weights[h];
+//
+//      // Input contribution
+//      for (uint32_t i = 0; i < config->input_size; i++) 
+//      {
+//        sum += curr_layer->input_weights[i * config->hidden_size + h] * input_t[i];
+//      }
+//
+//      // Previous hidden contribution
+//      if (h_prev) 
+//      {
+//        for (uint32_t prev_h = 0; prev_h < config->hidden_size; prev_h++) 
+//        {
+//          sum += curr_layer->hidden_weights[prev_h * config->hidden_size + h] * h_prev[prev_h];
+//        }
+//      }
+//      raw_hidden[h] = sum;
+//    }
+//
+//    // Apply activation gradient
+//    for (uint32_t h = 0; h < config->hidden_size; h++)
+//    {
+//      double activation_grad = FunctionGradient(curr_layer, raw_hidden[h]);
+//      h_grad[h] *= activation_grad;
+//    }
+//
+//    // Compute weight gradients
+//    for (uint32_t h = 0; h < config->hidden_size; h++)
+//    {
+//      // Bias gradient
+//      bias_grad[h] += h_grad[h];
+//
+//      // Input weight gradient (Wxh)
+//      for (uint32_t i = 0; i < config->input_size; i++)
+//      {
+//        wxh_grad[i * config->hidden_size + h] += h_grad[h] * input_t[i];
+//      }
+//
+//      // Hidden weight gradient (Whh)
+//      if (h_prev)
+//      {
+//        for (uint32_t prev_h = 0; prev_h < config->hidden_size; prev_h++) 
+//        {
+//          whh_grad[prev_h * config->hidden_size + h] += h_grad[h] * h_prev[prev_h];
+//        }
+//      }
+//    }
+//
+//    // Propagate error to input
+//    for (uint32_t i = 0; i < config->input_size; i++)
+//    {
+//      for (uint32_t h = 0; h < config->hidden_size; h++) 
+//      {
+//        prev->errors[t * config->input_size + i] += h_grad[h] * curr_layer->input_weights[i * config->hidden_size + h];
+//      }
+//    }
+//
+//    // Propagate error to previous hidden state
+//    if (t > 0) {
+//      for (uint32_t prev_h = 0; prev_h < config->hidden_size; prev_h++)
+//      {
+//        next_h_grad[prev_h] = 0.0;
+//        for (uint32_t h = 0; h < config->hidden_size; h++)
+//        {
+//          next_h_grad[prev_h] += h_grad[h] * curr_layer->hidden_weights[prev_h * config->hidden_size + h];
+//        }
+//      }
+//    }
+//  }
+//
+//  // Update weights using accumulated gradients
+//  for (uint32_t i = 0; i < config->input_size * config->hidden_size; i++)
+//  {
+//    curr_layer->input_weights[i] -= learningRate_ * wxh_grad[i];
+//  }
+//
+//  for (uint32_t i = 0; i < config->hidden_size * config->hidden_size; i++)
+//  {
+//    curr_layer->hidden_weights[i] -= learningRate_ * whh_grad[i];
+//  }
+//
+//
+//  for (uint32_t i = 0; i < config->hidden_size; i++) {
+//    curr_layer->bias_weights[i] -= learningRate_ * bias_grad[i];
+//  }
+//}
+
+//---------------------------------------------------------------------------------------------------------------
+
 Layer* Model::NextLayer(Layer* curr)
 {
   Layer* next = nullptr;
@@ -691,7 +1137,7 @@ void Model::BackwardPathFull(Layer* curr_layer)
         int k = i;
         for (uint32_t j = 0; j < curr_layer->n_outputs; j++)
         {
-          prev->errors[i] += curr_layer->weights[k] * curr_layer->errors[j] * curr_layer->gradients[j];
+          prev->errors[i] += curr_layer->weights[k] * curr_layer->errors[j] /* curr_layer->gradients[j]*/;
           k += prev->n_outputs;
         }
       }
@@ -727,22 +1173,409 @@ void Model::BackwardPathFull(Layer* curr_layer)
       {
         for (uint32_t i = 0; i < prev->n_outputs; i++)
         {
-          // Calculate gradient for each weight: error * activation gradient * input
-          curr_layer->u_weights[k++] = curr_layer->errors[j] * curr_layer->gradients[j] * prev->outputs[i];
+          // Accumulate gradients (add to existing u_weights)
+          //curr_layer->u_weights[k++] += curr_layer->errors[j] * curr_layer->gradients[j] * prev->outputs[i];
+          double current_gradient = curr_layer->errors[j] * curr_layer->gradients[j] * prev->outputs[i];
+          curr_layer->velocities[k] = momentum_ * curr_layer->velocities[k] + learningRate_ * current_gradient;
+          curr_layer->u_weights[k] += curr_layer->velocities[k];
+          k++;
         }
       }
 
-      // Update weights using calculated gradients
-      for (uint32_t i = 0; i < curr_layer->n_weights; i++)
+      currentBatchCount_++;
+      if (currentBatchCount_ >= batchSize_)
       {
-        // Basic gradient descent update
-        curr_layer->weights[i] -= learningRate_ * curr_layer->u_weights[i];
+        for (uint32_t i = 0; i < curr_layer->n_weights; i++)
+        {
+          double avg_gradient = curr_layer->u_weights[i] / batchSize_;
+          curr_layer->weights[i] -= learningRate_ * avg_gradient;
+          curr_layer->u_weights[i] = 0.0;
+        }
       }
     }
   }
 }
 
 //---------------------------------------------------------------------------------------------------------------
+
+void Model::ForwardPathAttention(Layer* curr_layer)
+{
+  Layer* prev = PreviousLayer(curr_layer);
+  Layer::AttentionConfig* config = curr_layer->attention_config;
+
+  uint32_t seq_len = config->seq_length;
+  uint32_t d_model = config->d_model;
+  uint32_t d_k = config->d_k;
+  uint32_t d_v = config->d_v;
+  uint32_t num_heads = config->num_heads;
+
+  // Initialize outputs to zero
+  for (uint32_t i = 0; i < curr_layer->n_outputs; i++)
+  {
+    curr_layer->outputs[i] = 0.0;
+  }
+
+  // For each attention head
+  for (uint32_t head = 0; head < num_heads; head++) 
+  {
+    uint32_t head_offset_qk = head * seq_len * d_k;
+    uint32_t head_offset_v = head * seq_len * d_v;
+    uint32_t head_offset_scores = head * seq_len * seq_len;
+
+    // Step 1: Compute Q, K, V matrices
+    // Q = X * W_Q, K = X * W_K, V = X * W_V
+    for (uint32_t i = 0; i < seq_len; i++) 
+    {
+      // Compute Q[i] = X[i] * W_Q
+      for (uint32_t j = 0; j < d_k; j++) 
+      {
+        curr_layer->temp_q[head_offset_qk + i * d_k + j] = 0.0;
+        for (uint32_t k = 0; k < d_model; k++) 
+        {
+          uint32_t weight_idx = head * d_model * d_k + j * d_model + k;
+          curr_layer->temp_q[head_offset_qk + i * d_k + j] +=  prev->outputs[i * d_model + k] * curr_layer->query_weights[weight_idx];
+        }
+      }
+
+      // Compute K[i] = X[i] * W_K
+      for (uint32_t j = 0; j < d_k; j++) 
+      {
+        curr_layer->temp_k[head_offset_qk + i * d_k + j] = 0.0;
+        for (uint32_t k = 0; k < d_model; k++) 
+        {
+          uint32_t weight_idx = head * d_model * d_k + j * d_model + k;
+          curr_layer->temp_k[head_offset_qk + i * d_k + j] += prev->outputs[i * d_model + k] * curr_layer->key_weights[weight_idx];
+        }
+      }
+
+      // Compute V[i] = X[i] * W_V
+      for (uint32_t j = 0; j < d_v; j++) 
+      {
+        curr_layer->temp_v[head_offset_v + i * d_v + j] = 0.0;
+        for (uint32_t k = 0; k < d_model; k++) 
+        {
+          uint32_t weight_idx = head * d_model * d_v + j * d_model + k;
+          curr_layer->temp_v[head_offset_v + i * d_v + j] +=  prev->outputs[i * d_model + k] * curr_layer->value_weights[weight_idx];
+        }
+      }
+    }
+
+    // Step 2: Compute attention scores Q * K^T / sqrt(d_k)
+    double scale_factor = 1.0 / sqrt((double)d_k);
+    for (uint32_t i = 0; i < seq_len; i++) 
+    {
+      for (uint32_t j = 0; j < seq_len; j++)
+      {
+        double score = 0.0;
+        for (uint32_t k = 0; k < d_k; k++) 
+        {
+          score += curr_layer->temp_q[head_offset_qk + i * d_k + k] *
+                   curr_layer->temp_k[head_offset_qk + j * d_k + k];
+        }
+        curr_layer->attention_scores[head_offset_scores + i * seq_len + j] = score * scale_factor;
+      }
+    }
+
+    // Step 3: Apply softmax to get attention weights
+    for (uint32_t i = 0; i < seq_len; i++)
+    {
+      // Find max for numerical stability
+      double max_score = curr_layer->attention_scores[head_offset_scores + i * seq_len];
+      for (uint32_t j = 1; j < seq_len; j++) 
+      {
+        double score = curr_layer->attention_scores[head_offset_scores + i * seq_len + j];
+        if (score > max_score) max_score = score;
+      }
+
+      // Compute softmax
+      double sum = 0.0;
+      for (uint32_t j = 0; j < seq_len; j++)
+      {
+        double exp_score = exp(curr_layer->attention_scores[head_offset_scores + i * seq_len + j] - max_score);
+        curr_layer->attention_weights[head_offset_scores + i * seq_len + j] = exp_score;
+        sum += exp_score;
+      }
+
+      // Normalize
+      for (uint32_t j = 0; j < seq_len; j++)
+      {
+        curr_layer->attention_weights[head_offset_scores + i * seq_len + j] /= sum;
+      }
+    }
+
+    // Step 4: Compute weighted sum of values
+    double* head_output = new double[seq_len * d_v];
+    for (uint32_t i = 0; i < seq_len * d_v; i++) head_output[i] = 0.0;
+
+    for (uint32_t i = 0; i < seq_len; i++)
+    {
+      for (uint32_t j = 0; j < d_v; j++) 
+      {
+        for (uint32_t k = 0; k < seq_len; k++)
+        {
+          head_output[i * d_v + j] +=
+            curr_layer->attention_weights[head_offset_scores + i * seq_len + k] *
+            curr_layer->temp_v[head_offset_v + k * d_v + j];
+        }
+      }
+    }
+
+    // Step 5: Apply output projection W_O
+    for (uint32_t i = 0; i < seq_len; i++)
+    {
+      for (uint32_t j = 0; j < d_model; j++)
+      {
+        for (uint32_t k = 0; k < d_v; k++) 
+        {
+          uint32_t weight_idx = head * d_v * d_model + j * d_v + k;
+          curr_layer->outputs[i * d_model + j] +=
+            head_output[i * d_v + k] * curr_layer->output_weights[weight_idx];
+        }
+      }
+    }
+
+    delete[] head_output;
+  }
+
+  // For multi-head, we've already summed the outputs
+  // For single head, outputs are already computed
+
+  // Store gradients (identity for attention - we'll compute actual gradients in backprop)
+  for (uint32_t i = 0; i < curr_layer->n_outputs; i++)
+  {
+    curr_layer->gradients[i] = 1.0;  // Identity gradient for attention mechanism
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+// Attention backward pass
+void Model::BackwardPathAttention(Layer* curr_layer)
+{
+  if (curr_layer->type != Layer::inputLayer) 
+  {
+    Layer* prev = layers_.at(curr_layer->layer_num - 1);
+    Layer::AttentionConfig* config = curr_layer->attention_config;
+
+    uint32_t seq_len = config->seq_length;
+    uint32_t d_model = config->d_model;
+    uint32_t d_k = config->d_k;
+    uint32_t d_v = config->d_v;
+    uint32_t num_heads = config->num_heads;
+
+    // Initialize previous layer errors
+    for (uint32_t i = 0; i < prev->n_outputs; i++) 
+    {
+      prev->errors[i] = 0.0;
+    }
+
+    // Initialize weight gradients
+    for (uint32_t i = 0; i < d_model * d_k * num_heads; i++) 
+    {
+      curr_layer->query_gradients[i] = 0.0;
+      curr_layer->key_gradients[i] = 0.0;
+    }
+    for (uint32_t i = 0; i < d_model * d_v * num_heads; i++)
+    {
+      curr_layer->value_gradients[i] = 0.0;
+    }
+    for (uint32_t i = 0; i < d_v * d_model * num_heads; i++) 
+    {
+      curr_layer->output_gradients[i] = 0.0;
+    }
+
+    double scale_factor = 1.0 / sqrt((double)d_k);
+
+    // For each attention head
+    for (uint32_t head = 0; head < num_heads; head++) 
+    {
+      uint32_t head_offset_qk = head * seq_len * d_k;
+      uint32_t head_offset_v = head * seq_len * d_v;
+      uint32_t head_offset_scores = head * seq_len * seq_len;
+
+      // Temporary arrays for gradients
+      double* grad_v = new double[seq_len * d_v];
+      double* grad_scores = new double[seq_len * seq_len];
+      double* grad_q = new double[seq_len * d_k];
+      double* grad_k = new double[seq_len * d_k];
+
+      // Initialize
+      for (uint32_t i = 0; i < seq_len * d_v; i++) grad_v[i] = 0.0;
+      for (uint32_t i = 0; i < seq_len * seq_len; i++) grad_scores[i] = 0.0;
+      for (uint32_t i = 0; i < seq_len * d_k; i++) 
+      {
+        grad_q[i] = 0.0;
+        grad_k[i] = 0.0;
+      }
+
+      // Backprop through output projection
+      for (uint32_t i = 0; i < seq_len; i++) 
+      {
+        for (uint32_t j = 0; j < d_model; j++) 
+        {
+          for (uint32_t k = 0; k < d_v; k++)
+          {
+            uint32_t weight_idx = head * d_v * d_model + j * d_v + k;
+
+            // Gradient w.r.t. output weights
+            curr_layer->output_gradients[weight_idx] +=
+              curr_layer->errors[i * d_model + j] * curr_layer->temp_v[head_offset_v + i * d_v + k];
+
+            // Gradient w.r.t. values
+            grad_v[i * d_v + k] +=
+              curr_layer->errors[i * d_model + j] * curr_layer->output_weights[weight_idx];
+          }
+        }
+      }
+
+      // Backprop through attention weights to values
+      for (uint32_t i = 0; i < seq_len; i++) 
+      {
+        for (uint32_t j = 0; j < d_v; j++) 
+        {
+          for (uint32_t k = 0; k < seq_len; k++)
+          {
+            // Gradient w.r.t. attention scores
+            grad_scores[i * seq_len + k] +=
+              grad_v[i * d_v + j] * curr_layer->temp_v[head_offset_v + k * d_v + j];
+          }
+        }
+      }
+
+      // Backprop through softmax
+      for (uint32_t i = 0; i < seq_len; i++)
+      {
+        for (uint32_t j = 0; j < seq_len; j++)
+        {
+          double softmax_grad = 0.0;
+          for (uint32_t k = 0; k < seq_len; k++)
+          {
+            double delta_jk = (j == k) ? 1.0 : 0.0;
+            softmax_grad += grad_scores[i * seq_len + k] *
+              curr_layer->attention_weights[head_offset_scores + i * seq_len + j] *
+              (delta_jk - curr_layer->attention_weights[head_offset_scores + i * seq_len + k]);
+          }
+          grad_scores[i * seq_len + j] = softmax_grad * scale_factor;
+        }
+      }
+
+      // Backprop through Q*K^T to Q and K
+      for (uint32_t i = 0; i < seq_len; i++) 
+      {
+        for (uint32_t j = 0; j < seq_len; j++)
+        {
+          for (uint32_t k = 0; k < d_k; k++) 
+          {
+            // Gradient w.r.t. Q
+            grad_q[i * d_k + k] +=
+              grad_scores[i * seq_len + j] * curr_layer->temp_k[head_offset_qk + j * d_k + k];
+
+            // Gradient w.r.t. K
+            grad_k[j * d_k + k] +=
+              grad_scores[i * seq_len + j] * curr_layer->temp_q[head_offset_qk + i * d_k + k];
+          }
+        }
+      }
+
+      // Backprop through linear projections to input and weights
+      for (uint32_t i = 0; i < seq_len; i++) 
+      {
+        for (uint32_t j = 0; j < d_model; j++)
+        {
+          // Query gradients
+          for (uint32_t k = 0; k < d_k; k++) {
+            uint32_t weight_idx = head * d_model * d_k + k * d_model + j;
+            curr_layer->query_gradients[weight_idx] +=
+              grad_q[i * d_k + k] * prev->outputs[i * d_model + j];
+            prev->errors[i * d_model + j] +=
+              grad_q[i * d_k + k] * curr_layer->query_weights[weight_idx];
+          }
+
+          // Key gradients
+          for (uint32_t k = 0; k < d_k; k++) 
+          {
+            uint32_t weight_idx = head * d_model * d_k + k * d_model + j;
+            curr_layer->key_gradients[weight_idx] +=
+              grad_k[i * d_k + k] * prev->outputs[i * d_model + j];
+            prev->errors[i * d_model + j] +=
+              grad_k[i * d_k + k] * curr_layer->key_weights[weight_idx];
+          }
+
+          // Value gradients
+          for (uint32_t k = 0; k < d_v; k++) 
+          {
+            uint32_t weight_idx = head * d_model * d_v + k * d_model + j;
+            curr_layer->value_gradients[weight_idx] +=
+              grad_v[i * d_v + k] * prev->outputs[i * d_model + j];
+            prev->errors[i * d_model + j] +=
+              grad_v[i * d_v + k] * curr_layer->value_weights[weight_idx];
+          }
+        }
+      }
+
+      delete[] grad_v;
+      delete[] grad_scores;
+      delete[] grad_q;
+      delete[] grad_k;
+    }
+
+    // Update weights using gradients
+    for (uint32_t i = 0; i < d_model * d_k * num_heads; i++) 
+    {
+      curr_layer->query_weights[i] -= learningRate_ * curr_layer->query_gradients[i];
+      curr_layer->key_weights[i] -= learningRate_ * curr_layer->key_gradients[i];
+    }
+    for (uint32_t i = 0; i < d_model * d_v * num_heads; i++) 
+    {
+      curr_layer->value_weights[i] -= learningRate_ * curr_layer->value_gradients[i];
+    }
+    for (uint32_t i = 0; i < d_v * d_model * num_heads; i++) 
+    {
+      curr_layer->output_weights[i] -= learningRate_ * curr_layer->output_gradients[i];
+    }
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+void Model::ForwardPathSoftmax(Layer* curr_layer)
+{
+  Layer* prev_layer = PreviousLayer(curr_layer);
+  double max_val = prev_layer->outputs[0];
+  for (uint32_t i = 1; i < curr_layer->n_outputs; ++i)
+  {
+    if (prev_layer->outputs[i] > max_val)
+    {
+      max_val = prev_layer->outputs[i];
+    }
+  }
+  double sum = 0.0;
+  for (uint32_t i = 0; i < prev_layer->n_outputs; ++i)
+  {
+    curr_layer->outputs[i] = exp(prev_layer->outputs[i] - max_val);
+    sum += curr_layer->outputs[i];
+  }
+  for (uint32_t i = 0; i < curr_layer->n_outputs; ++i)
+  {
+    curr_layer->outputs[i] /= sum;
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+void Model::BackwardPathSoftmax(Layer* curr_layer)
+{
+  Layer* prev_layer = PreviousLayer(curr_layer);
+  if (prev_layer == nullptr) return;
+
+  for (uint32_t i = 0; i < prev_layer->n_outputs; ++i)
+  {
+    prev_layer->errors[i] = curr_layer->errors[i];
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
 void Model::ForwardPathMaxpool(Layer* curr_layer)
 {
   Layer* prev_layer = PreviousLayer(curr_layer);
@@ -1121,6 +1954,10 @@ void Model::ForwardPath(Layer* layer)
   {
     ForwardPathFull(layer);
   }
+  else if (layer->type == Layer::attentionLayer) 
+  {
+    ForwardPathAttention(layer);
+  }
   else if (layer->type == Layer::convLayer)
   {
     ForwardPathConv(layer);
@@ -1132,6 +1969,10 @@ void Model::ForwardPath(Layer* layer)
   else if (layer->type == Layer::normalizationLayer)
   {
     ForwardPathLayerNorm(layer);
+  }
+  else if (layer->type == Layer::softmax)
+  {
+    ForwardPathSoftmax(layer);
   }
 }
 
@@ -1173,12 +2014,47 @@ void Model::TrainData(std::vector<double> values)
     {
       BackwardPathFull(curr);
     }
+    else if (curr->type == Layer::attentionLayer) 
+    {
+      BackwardPathAttention(curr);
+    }
+    else if (curr->type == Layer::softmax)
+    {
+      BackwardPathSoftmax(curr);
+    }
     else
     {
       BackwardPathFull(curr);
     }
 
     curr = PreviousLayer(curr);
+  }
+  if (currentBatchCount_ >= batchSize_)
+  {
+    currentBatchCount_ = 0;
+  }
+}
+
+//---------------------------------------------------------------------------------------------------------------
+
+void Model::FlushBatch()
+{
+  if (currentBatchCount_ > 0) 
+  {
+    // Force update with partial batch
+    for (auto& layer : layers_) 
+    {
+      if (layer->u_weights != nullptr) 
+      {
+        for (uint32_t i = 0; i < layer->n_weights; i++) 
+        {
+          double avg_gradient = layer->u_weights[i] / currentBatchCount_;
+          layer->weights[i] -= learningRate_ * avg_gradient;
+          layer->u_weights[i] = 0.0;
+        }
+      }
+    }
+    currentBatchCount_ = 0;
   }
 }
 
@@ -1671,6 +2547,7 @@ void Model::LearnData(std::vector<double> inputs, std::vector<double> outputs)
   training_ = true;
   InputData(inputs);
   TrainData(outputs);
+
   double errors = GetTotalError();
   m_totalError += errors;
   training_ = false;
@@ -1874,7 +2751,6 @@ bool Model::SaveModelBinary(const std::string& filename)
     }
 
     file.close();
-    printf("Model saved successfully to %s\n", filename.c_str());
     return true;
   }
 }
@@ -2022,4 +2898,231 @@ bool Model::LoadModelBinary(const std::string& filename)
   file.close();
   printf("Model loaded successfully from %s\n", filename.c_str());
   return true;
+}
+
+void Model::PrintModelSummary() const
+{
+  if (layers_.empty())
+  {
+    printf("Model is empty - no layers defined\n");
+    return;
+  }
+
+  printf("\n");
+  printf("================================================================================\n");
+  printf("                              MODEL SUMMARY                                     \n");
+  printf("================================================================================\n");
+  printf("Model Name: %s\n", modelName_.empty() ? "Unnamed" : modelName_.c_str());
+  printf("Total Layers: %zu\n", layers_.size());
+
+  // Calculate total parameters
+  uint64_t total_weights = 0;
+  uint64_t trainable_weights = 0;
+  for (const auto& layer : layers_)
+  {
+    total_weights += layer->n_weights;
+    if (layer->type != Layer::inputLayer && layer->type != Layer::maxpoolLayer &&
+      layer->type != Layer::normalizationLayer)
+    {
+      trainable_weights += layer->n_weights;
+    }
+  }
+
+  printf("Total Parameters: %llu\n", total_weights);
+  printf("Trainable Parameters: %llu\n", trainable_weights);
+  printf("\n");
+
+  // Print layer details table
+  printf("+-----+-----------------+-------------+----------------+-----------+-------------+\n");
+  printf("| #   | Layer Type      | Output Size | Activation     | Weights   | Details     |\n");
+  printf("+-----+-----------------+-------------+----------------+-----------+-------------+\n");
+
+  for (size_t i = 0; i < layers_.size(); i++)
+  {
+    const Layer* layer = layers_[i];
+    std::string layer_type = GetLayerTypeString(layer->type);
+    std::string activation = GetActivationString(layer->funct);
+    std::string output_size = GetOutputSizeString(layer);
+    std::string details = GetLayerDetailsString(layer);
+
+    printf("| %-3zu | %-15s | %-11s | %-14s | %-9u | %-11s |\n",
+      i, layer_type.c_str(), output_size.c_str(),
+      activation.c_str(), layer->n_weights, details.c_str());
+  }
+
+  printf("+-----+-----------------+-------------+----------------+-----------+-------------+\n");
+  printf("\n");
+
+  // Print residual connections if any
+  bool has_residuals = false;
+  for (const auto& layer : layers_)
+  {
+    if (layer->has_residual_connection)
+    {
+      if (!has_residuals)
+      {
+        printf("Residual Connections:\n");
+        has_residuals = true;
+      }
+      printf("  Layer %d -> Layer %d (skip connection)\n",
+        layer->residual_source_layer, layer->layer_num);
+    }
+  }
+
+  if (has_residuals) printf("\n");
+
+  // Print pruning info if enabled
+  if (pruning_)
+  {
+    printf("Pruning: ENABLED (threshold: %.6f)\n", pruningThreshold_);
+    uint64_t active_weights = 0;
+    for (const auto& layer : layers_)
+    {
+      for (uint32_t j = 0; j < layer->n_weights; j++)
+      {
+        if (abs(layer->weights[j]) > pruningThreshold_)
+        {
+          active_weights++;
+        }
+      }
+    }
+    printf("Active Weights: %llu/%llu (%.2f%%)\n",
+      active_weights, total_weights,
+      total_weights > 0 ? (100.0 * active_weights / total_weights) : 0.0);
+    printf("\n");
+  }
+
+  printf("================================================================================\n");
+}
+
+
+void Model::PrintDetailedModel() const
+{
+  if (layers_.empty())
+  {
+    printf("Model is empty - no layers defined\n");
+    return;
+  }
+
+  printf("\n");
+  printf("================================================================================\n");
+  printf("                           DETAILED MODEL REPORT                               \n");
+  printf("================================================================================\n");
+  printf("Model Name: %s\n", modelName_.empty() ? "Unnamed" : modelName_.c_str());
+  printf("Total Layers: %zu\n\n", layers_.size());
+
+  for (size_t i = 0; i < layers_.size(); i++)
+  {
+    const Layer* layer = layers_[i];
+
+    printf("Layer %zu: %s\n", i, GetLayerTypeString(layer->type).c_str());
+    printf("  Layer Number: %d\n", layer->layer_num);
+    printf("  Outputs: %u\n", layer->n_outputs);
+    printf("  Weights: %u\n", layer->n_weights);
+
+    if (layer->type == Layer::inputLayer || layer->type == Layer::convLayer)
+    {
+      printf("  Dimensions: %ux%ux%u (HxWxD)\n",
+        layer->height, layer->width, layer->depth);
+    }
+
+    if (layer->type == Layer::convLayer || layer->type == Layer::maxpoolLayer)
+    {
+      printf("  Kernel Size: %u\n", layer->kern_size);
+      printf("  Stride: %u\n", layer->stride);
+      if (layer->type == Layer::convLayer)
+      {
+        printf("  Padding: %u\n", layer->padding);
+      }
+    }
+
+    if (layer->type != Layer::inputLayer && layer->type != Layer::maxpoolLayer && layer->type != Layer::normalizationLayer)
+    {
+      printf("  Activation: %s\n", GetActivationString(layer->funct).c_str());
+    }
+
+    if (layer->has_residual_connection)
+    {
+      printf("  Residual Connection: FROM Layer %u\n", layer->residual_source_layer);
+    }
+
+    if (layer->n_weights > 0)
+    {
+      // Calculate weight statistics
+      double min_weight = layer->weights[0];
+      double max_weight = layer->weights[0];
+      double sum_weight = 0.0;
+      uint32_t zero_weights = 0;
+
+      for (uint32_t j = 0; j < layer->n_weights; j++)
+      {
+        double w = layer->weights[j];
+        if (w < min_weight) min_weight = w;
+        if (w > max_weight) max_weight = w;
+        sum_weight += w;
+        if (abs(w) <= 1e-9) zero_weights++;
+      }
+
+      double avg_weight = sum_weight / layer->n_weights;
+      printf("  Weight Stats: min=%.6f, max=%.6f, avg=%.6f\n", min_weight, max_weight, avg_weight);
+      printf("  Zero Weights: %u/%u (%.2f%%)\n", zero_weights, layer->n_weights, 100.0 * zero_weights / layer->n_weights);
+    }
+
+    printf("\n");
+  }
+
+  printf("================================================================================\n");
+}
+
+
+std::string Model::GetLayerTypeString(Layer::LayerType type) const
+{
+  switch (type)
+  {
+  case Layer::inputLayer:        return "Input";
+  case Layer::fullLayer:         return "Dense/Full";
+  case Layer::convLayer:         return "Convolution";
+  case Layer::maxpoolLayer:      return "MaxPool";
+  case Layer::normalizationLayer: return "Normalization";
+  default:                       return "Unknown";
+  }
+}
+
+std::string Model::GetActivationString(Layer::ActivationFunc func) const
+{
+  switch (func)
+  {
+  case Layer::sigmoid:    return "Sigmoid";
+  case Layer::tanh:       return "Tanh";
+  case Layer::relu:       return "ReLU";
+  case Layer::leakyRelu:  return "LeakyReLU";
+  default:                return "None";
+  }
+}
+
+std::string Model::GetOutputSizeString(const Layer* layer) const
+{
+  if (layer->type == Layer::inputLayer || layer->type == Layer::convLayer)
+  {
+    return std::to_string(layer->height) + "x" + std::to_string(layer->width) + "x" + std::to_string(layer->depth);
+  }
+  else
+  {
+    return std::to_string(layer->n_outputs);
+  }
+}
+
+std::string Model::GetLayerDetailsString(const Layer* layer) const
+{
+  switch (layer->type)
+  {
+  case Layer::convLayer:
+    return "k=" + std::to_string(layer->kern_size) + ",s=" + std::to_string(layer->stride);
+  case Layer::maxpoolLayer:
+    return "k=" + std::to_string(layer->kern_size) + ",s=" + std::to_string(layer->stride);
+  case Layer::fullLayer:
+    return layer->has_residual_connection ? "Residual" : "Standard";
+  default:
+    return "-";
+  }
 }
